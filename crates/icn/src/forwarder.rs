@@ -30,11 +30,11 @@ use rsticulum_identity::Keys;
 use tokio::sync::oneshot;
 
 use crate::cs::ContentStore;
-use crate::face::{Face, FaceCapabilities, FaceId};
+use crate::face::{Face, FaceId};
 use crate::fib::Fib;
 use crate::interest::{Data, Interest};
 use crate::name::Name;
-use crate::pit::{Pit, PitOp};
+use crate::pit::Pit;
 use crate::strategy::{BestRoute, Strategy, StrategyDecision};
 
 /// Result returned to a consumer expressing an Interest.
@@ -347,7 +347,7 @@ impl Forwarder {
         .await;
 
         match result {
-            Ok(Ok(Some((data, face_id)))) => {
+            Ok(Ok(Some(data))) => {
                 // Verify signature
                 if let Err(e) = self.verify_data(&data) {
                     self.pit.satisfy(&name);
@@ -355,9 +355,7 @@ impl Forwarder {
                 }
 
                 // Record success
-                if let Some(best) = self.strategy_as_best_route_mut() {
-                    best.record_success(face_id);
-                }
+                // (face_id not tracked in multicast — skip backoff update)
 
                 // Cache and notify
                 self.cs.insert(data.name.clone(), data.clone());
