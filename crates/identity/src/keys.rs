@@ -4,6 +4,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 
 /// A keypair bundle: Ed25519 (signing/identity) + X25519 (encryption).
+#[derive(Clone)]
 pub struct Keys {
     signing: SigningKey,
     encryption: x25519_dalek::StaticSecret,
