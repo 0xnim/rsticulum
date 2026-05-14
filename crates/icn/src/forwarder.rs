@@ -585,4 +585,116 @@ mod tests {
         let result = fw.express(interest, 1).await.unwrap();
         assert!(result.is_none());
     }
+
+    #[tokio::test]
+    async fn test_pit_aggregation_two_consumers() {
+        // PIT aggregation: two consumers express the same Interest.
+        // The first creates a PIT entry, the second aggregates.
+        // When Data arrives via receive_data, the CS hit serves the second.
+        let (face_a, face_b) = test_face_pair();
+        let mut fw = Forwarder::new();
+        fw.register_face(face_a.clone());
+        fw.add_route(make_name(0x01), face_a.id(), 10);
+
+        let (keys, hash) = make_keys(0x01);
+        fw.register_keys(hash, keys.clone());
+
+        // Create signed response
+        let response = {
+            let data = Data::new(
+                make_name(0x01),
+                b"shared".to_vec(),
+                Proof::from_bytes(&vec![0u8; 96]).unwrap(),
+            );
+            let mut data = data;
+            let signed_hash = {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&data.name.to_bytes());
+                hasher.update(&data.content);
+                *hasher.finalize().as_bytes()
+            };
+            data.signature = rsticulum_transport::generate_proof(&keys, &signed_hash);
+            data.metadata.content_hash = Some(blake3::hash(&data.content).into());
+            data
+        };
+
+        // Producer that responds
+        let face_b_clone = face_b.clone();
+        let response_clone = response.clone();
+        tokio::spawn(async move {
+            if let Some(_interest) = face_b_clone.recv_interest() {
+                let _ = face_b_clone.send_data(&response_clone).await;
+            }
+        });
+
+        // First consumer expresses Interest — this creates a PIT entry
+        let interest1 = Interest::new(make_name(0x01)).with_lifetime(Duration::from_millis(500));
+        let result1 = fw.express(interest1, 1).await.unwrap();
+        assert!(result1.is_some());
+
+        // Data should now be in CS
+        assert!(fw.cs().contains(&make_name(0x01)));
+
+        // Second consumer expresses same Interest — should get CS hit
+        // (PIT entry was already satisfied and purged)
+        let interest2 = Interest::new(make_name(0x01));
+        let result2 = fw.express(interest2, 2).await.unwrap();
+        assert!(result2.is_some());
+        assert_eq!(result2.unwrap().content, b"shared");
+    }
+
+    #[tokio::test]
+    async fn test_unsolicited_data_cached() {
+        let mut fw = Forwarder::new();
+        let (keys, hash) = make_keys(0x01);
+        fw.register_keys(hash, keys.clone());
+
+        // Create signed Data
+        let name = make_name(0x01);
+        let data = {
+            let d = Data::new(
+                name.clone(),
+                b"unsolicited".to_vec(),
+                Proof::from_bytes(&vec![0u8; 96]).unwrap(),
+            );
+            let mut d = d;
+            let signed_hash = {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&d.name.to_bytes());
+                hasher.update(&d.content);
+                *hasher.finalize().as_bytes()
+            };
+            d.signature = rsticulum_transport::generate_proof(&keys, &signed_hash);
+            d.metadata.content_hash = Some(blake3::hash(&d.content).into());
+            d
+        };
+
+        // Receive unsolicited Data
+        fw.receive_data(data, 0).await.unwrap();
+
+        // Should be cached
+        assert!(fw.cs().contains(&name));
+
+        // Subsequent Interest should be CS hit
+        let interest = Interest::new(name);
+        let result = fw.express(interest, 0).await.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().content, b"unsolicited");
+    }
+
+    #[tokio::test]
+    async fn test_unsolicited_data_unknown_producer_rejected() {
+        let mut fw = Forwarder::new();
+        // Don't register keys
+        let name = make_name(0x01);
+        let data = Data::new(
+            name,
+            b"bad".to_vec(),
+            Proof::from_bytes(&vec![0u8; 96]).unwrap(),
+        );
+
+        let result = fw.receive_data(data, 0).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown producer"));
+    }
 }
