@@ -320,8 +320,9 @@ impl Forwarder {
         for face_id in &face_ids {
             if let Some(face) = self.faces.get(face_id).cloned() {
                 let interest = interest.clone();
+                let fid = *face_id;
                 handles.push(tokio::spawn(async move {
-                    (face.express_interest(&interest).await, *face_id)
+                    (face.express_interest(&interest).await, fid)
                 }));
             }
         }
@@ -335,7 +336,7 @@ impl Forwarder {
                         let handle = handles.remove(i);
                         match handle.await.unwrap() {
                             (Ok(Some(data)), _face_id) => {
-                                return Ok(Some(data));
+                                return Ok::<_, std::convert::Infallible>(Some(data));
                             }
                             _ => continue,
                         }
@@ -499,23 +500,24 @@ mod tests {
         let (face_a, face_b) = test_face_pair();
         let mut fw = Forwarder::new();
 
+        // Generate keys and use the real hash for names
+        let (keys, hash) = make_keys(0);
+        let name = Name::new(hash, &[b"test"]);
+
         // Register face_a
         fw.register_face(face_a.clone());
-        let name = make_name(0x01);
-        fw.add_route(make_name(0x01), face_a.id(), 10);
+        fw.add_route(Name::new(hash, &[]), face_a.id(), 10);
 
         // Register keys for verification
-        let (keys, hash) = make_keys(0x01);
         fw.register_keys(hash, keys.clone());
 
         // Spawn producer on face_b
         let response = {
             let mut data = Data::new(
-                make_name(0x01),
+                name.clone(),
                 b"hello".to_vec(),
                 Proof::from_bytes(&vec![0u8; 96]).unwrap(),
             );
-            // Create a properly signed response using the keys
             let signed_hash = {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(&data.name.to_bytes());
@@ -528,7 +530,7 @@ mod tests {
         };
         spawn_producer(face_b, response.clone());
 
-        let interest = Interest::new(make_name(0x01)).with_lifetime(Duration::from_millis(500));
+        let interest = Interest::new(name).with_lifetime(Duration::from_millis(500));
         let result = fw.express(interest, 1).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().content, b"hello");
@@ -538,16 +540,17 @@ mod tests {
     async fn test_cs_cache_after_forward() {
         let (face_a, face_b) = test_face_pair();
         let mut fw = Forwarder::new();
-        fw.register_face(face_a.clone());
-        let name = make_name(0x01);
-        fw.add_route(make_name(0x01), face_a.id(), 10);
 
-        let (keys, hash) = make_keys(0x01);
+        let (keys, hash) = make_keys(0);
+        let name = Name::new(hash, &[b"test"]);
+
+        fw.register_face(face_a.clone());
+        fw.add_route(Name::new(hash, &[]), face_a.id(), 10);
         fw.register_keys(hash, keys.clone());
 
         let response = {
             let data = Data::new(
-                make_name(0x01),
+                name.clone(),
                 b"cached".to_vec(),
                 Proof::from_bytes(&vec![0u8; 96]).unwrap(),
             );
@@ -565,11 +568,11 @@ mod tests {
         spawn_producer(face_b, response);
 
         // First express: forward to producer
-        let interest = Interest::new(make_name(0x01)).with_lifetime(Duration::from_millis(500));
+        let interest = Interest::new(name.clone()).with_lifetime(Duration::from_millis(500));
         let _result = fw.express(interest, 1).await.unwrap();
 
         // Second express: should be CS hit
-        let interest2 = Interest::new(make_name(0x01));
+        let interest2 = Interest::new(name);
         let result2 = fw.express(interest2, 1).await.unwrap();
         assert!(result2.is_some());
         assert_eq!(result2.unwrap().content, b"cached");
@@ -596,16 +599,18 @@ mod tests {
         // When Data arrives via receive_data, the CS hit serves the second.
         let (face_a, face_b) = test_face_pair();
         let mut fw = Forwarder::new();
-        fw.register_face(face_a.clone());
-        fw.add_route(make_name(0x01), face_a.id(), 10);
 
-        let (keys, hash) = make_keys(0x01);
+        let (keys, hash) = make_keys(0);
+        let name = Name::new(hash, &[b"test"]);
+
+        fw.register_face(face_a.clone());
+        fw.add_route(Name::new(hash, &[]), face_a.id(), 10);
         fw.register_keys(hash, keys.clone());
 
         // Create signed response
         let response = {
             let data = Data::new(
-                make_name(0x01),
+                name.clone(),
                 b"shared".to_vec(),
                 Proof::from_bytes(&vec![0u8; 96]).unwrap(),
             );
@@ -631,16 +636,16 @@ mod tests {
         });
 
         // First consumer expresses Interest — this creates a PIT entry
-        let interest1 = Interest::new(make_name(0x01)).with_lifetime(Duration::from_millis(500));
+        let interest1 = Interest::new(name.clone()).with_lifetime(Duration::from_millis(500));
         let result1 = fw.express(interest1, 1).await.unwrap();
         assert!(result1.is_some());
 
         // Data should now be in CS
-        assert!(fw.cs().contains(&make_name(0x01)));
+        assert!(fw.cs().contains(&name));
 
         // Second consumer expresses same Interest — should get CS hit
         // (PIT entry was already satisfied and purged)
-        let interest2 = Interest::new(make_name(0x01));
+        let interest2 = Interest::new(name);
         let result2 = fw.express(interest2, 2).await.unwrap();
         assert!(result2.is_some());
         assert_eq!(result2.unwrap().content, b"shared");
@@ -649,11 +654,11 @@ mod tests {
     #[tokio::test]
     async fn test_unsolicited_data_cached() {
         let mut fw = Forwarder::new();
-        let (keys, hash) = make_keys(0x01);
+        let (keys, hash) = make_keys(0);
+        let name = Name::new(hash, &[b"test"]);
         fw.register_keys(hash, keys.clone());
 
         // Create signed Data
-        let name = make_name(0x01);
         let data = {
             let d = Data::new(
                 name.clone(),

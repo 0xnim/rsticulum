@@ -6,21 +6,16 @@
 //!
 //! Run: cargo run -p rsticulum-icn --bin icn-demo
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use rsticulum_icn::{
-    face::{test_face_pair, TestFace},
-    Data, EntryKind, Forwarder, Interest, Manifest, ManifestEntry, Name,
+    face::test_face_pair, Data, EntryKind, Face, Forwarder, Interest, Manifest, ManifestEntry, Name,
 };
 use rsticulum_identity::Keys;
+use rsticulum_transport;
 
-fn main() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(demo());
-}
-
-async fn demo() {
+#[tokio::main]
+async fn main() {
     println!("╔══════════════════════════════════════════════╗");
     println!("║        rsticulum-icn — Pipeline Demo         ║");
     println!("╚══════════════════════════════════════════════╝\n");
@@ -119,9 +114,13 @@ async fn demo() {
     tokio::spawn(async move {
         loop {
             if let Some(interest) = face_b.recv_interest() {
-                let mut fw = producer_fw.lock().unwrap();
-                let cs_hit = fw.cs_mut().get(&interest.name).cloned();
-                if let Some(data) = cs_hit {
+                // Get data while holding the lock briefly
+                let data = {
+                    let mut fw = producer_fw.lock().unwrap();
+                    fw.cs_mut().get(&interest.name).cloned()
+                };
+                // Send data without holding the lock
+                if let Some(data) = data {
                     let _ = face_b.send_data(&data).await;
                 }
             }

@@ -36,6 +36,7 @@ pub use cs::ContentStore;
 pub use data::{Data, DataError, DataMetadata, Freshness};
 pub use face::{test_face_pair, Face, FaceCapabilities, FaceId, TestFace};
 pub use fib::{Fib, FibEntry};
+pub use forwarder::Forwarder;
 pub use interest::{Interest, InterestError, InterestSelector};
 pub use link_face::LinkFace;
 pub use manifest::{ChunkRef, ContentManifest, EntryKind, Manifest, ManifestEntry, ManifestError};

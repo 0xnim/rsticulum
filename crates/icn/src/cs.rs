@@ -13,7 +13,7 @@ use crate::name::Name;
 
 /// A cached Data packet with insertion timestamp.
 #[derive(Clone, Debug)]
-struct CachedData {
+pub struct CachedData {
     data: Data,
     inserted_at: Instant,
 }
