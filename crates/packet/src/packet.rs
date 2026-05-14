@@ -39,7 +39,6 @@ pub enum PacketError {
 // Suppress dead_code — these are referenced by the transport layer.
 
 #[allow(dead_code)]
-
 /// Packet type constants.
 pub const DATA: u8 = 0x00;
 pub const ANNOUNCE: u8 = 0x01;

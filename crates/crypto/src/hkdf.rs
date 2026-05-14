@@ -33,7 +33,7 @@ pub fn hkdf_sha256(
     let prk = mac.finalize().into_bytes();
 
     // Step 4: Expand — T(0) = empty, T(i) = HMAC-SHA256(PRK, T(i-1) || context || i)
-    let n = (length + 31) / 32; // ceil(length / 32)
+    let n = length.div_ceil(32);
     let mut output = Vec::with_capacity(n * 32);
     let mut t_prev: Vec<u8> = Vec::new();
 
