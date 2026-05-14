@@ -2,12 +2,13 @@
 name = "rsticulum-mesh"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Reticulum mesh routing: HRR, link quality, path discovery, medium abstraction"
 
 [dependencies]
-rsticulum-identity = { path = "../identity" }
-rsticulum-packet = { path = "../packet" }
-rsticulum-destination = { path = "../destination" }
+rsticulum-identity = { version = "0.1.0", path = "../identity" }
+rsticulum-packet = { version = "0.1.0", path = "../packet" }
+rsticulum-destination = { version = "0.1.0", path = "../destination" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

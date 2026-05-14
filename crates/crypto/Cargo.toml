@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 description = "Cryptographic primitives for rsticulum — HKDF-SHA256 key derivation and RNS Token (simplified Fernet)"
 license.workspace = true
-publish = false
 
 [dependencies]
 hmac = "0.12"

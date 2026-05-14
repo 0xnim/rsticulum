@@ -2,10 +2,11 @@
 name = "rsticulum-destination"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "RNS Destination abstraction"
 
 [dependencies]
-rsticulum-identity = { path = "../identity" }
-rsticulum-packet = { path = "../packet" }
+rsticulum-identity = { version = "0.1.0", path = "../identity" }
+rsticulum-packet = { version = "0.1.0", path = "../packet" }
 sha2 = "0.10"
 hex = "0.4"

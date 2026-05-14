@@ -2,10 +2,11 @@
 name = "rsticulum-identity"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Cryptographic identity: Ed25519/X25519 keys, 16-byte RNS-compatible addresses"
 
 [dependencies]
-rsticulum-crypto = { path = "../crypto" }
+rsticulum-crypto = { version = "0.1.0", path = "../crypto" }
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "serde"] }
 blake3 = "1"
