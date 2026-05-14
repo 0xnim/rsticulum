@@ -1,0 +1,18 @@
+[package]
+name = "rsticulum-interface"
+version.workspace = true
+edition.workspace = true
+description = "Network interfaces: KISS, serial, TCP, I2P framing"
+
+[dependencies]
+rsticulum-packet = { path = "../packet" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+hex = "0.4"
+thiserror = "2"
+tracing = "0.1"
+serialport = "4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"

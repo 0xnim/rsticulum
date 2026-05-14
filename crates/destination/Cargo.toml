@@ -1,0 +1,11 @@
+[package]
+name = "rsticulum-destination"
+version.workspace = true
+edition.workspace = true
+description = "RNS Destination abstraction"
+
+[dependencies]
+rsticulum-identity = { path = "../identity" }
+rsticulum-packet = { path = "../packet" }
+sha2 = "0.10"
+hex = "0.4"

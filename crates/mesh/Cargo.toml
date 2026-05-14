@@ -1,0 +1,24 @@
+[package]
+name = "rsticulum-mesh"
+version.workspace = true
+edition.workspace = true
+description = "Reticulum mesh routing: HRR, link quality, path discovery, medium abstraction"
+
+[dependencies]
+rsticulum-identity = { path = "../identity" }
+rsticulum-packet = { path = "../packet" }
+rsticulum-destination = { path = "../destination" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+bincode = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+rand = "0.8"
+tracing = "0.1"
+
+[dev-dependencies]
+rstest = "0.24"
+tokio-test = "0.4"

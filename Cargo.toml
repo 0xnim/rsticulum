@@ -1,0 +1,63 @@
+[package]
+name = "rsticulum"
+version.workspace = true
+edition.workspace = true
+description = "Reticulum Rust port — rsticulum workspace with integration tests"
+publish = false
+
+[workspace]
+members = [
+    "crates/identity",
+    "crates/packet",
+    "crates/destination",
+    "crates/mesh",
+    "crates/transport",
+    "crates/interface",
+    "crates/backbone",
+    "crates/bridge",
+    "crates/icn",
+    "crates/daemon",
+    "crates/sdk",
+    "crates/crypto",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+rsticulum-identity = { path = "crates/identity" }
+rsticulum-packet = { path = "crates/packet" }
+rsticulum-destination = { path = "crates/destination" }
+rsticulum-mesh = { path = "crates/mesh" }
+rsticulum-transport = { path = "crates/transport" }
+rsticulum-interface = { path = "crates/interface" }
+rsticulum-crypto = { path = "crates/crypto" }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+async-trait = "0.1"
+
+[profile.test]
+opt-level = 1
+
+[dependencies]
+rsticulum-identity.workspace = true
+rsticulum-packet.workspace = true
+rsticulum-destination.workspace = true
+rsticulum-mesh.workspace = true
+rsticulum-transport.workspace = true
+rsticulum-interface.workspace = true
+
+[dev-dependencies]
+rsticulum-crypto = { path = "crates/crypto" }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+x25519-dalek = "2"
+getrandom = "0.2"

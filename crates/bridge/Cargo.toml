@@ -1,0 +1,8 @@
+[package]
+name = "rsticulum-bridge"
+version.workspace = true
+edition.workspace = true
+license = "AGPL-3.0-only"
+description = "SCION edge bridge — border router stitching mesh into backbone"
+
+[dependencies]

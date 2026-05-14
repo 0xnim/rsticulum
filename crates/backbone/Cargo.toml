@@ -1,0 +1,8 @@
+[package]
+name = "rsticulum-backbone"
+version.workspace = true
+edition.workspace = true
+license = "AGPL-3.0-only"
+description = "SCION-inspired source-routed backbone for rsticulum"
+
+[dependencies]

@@ -1,0 +1,15 @@
+[package]
+name = "rsticulum-packet"
+version.workspace = true
+edition.workspace = true
+description = "RNS wire-compatible packet format — pure protocol definition"
+
+[dependencies]
+rsticulum-identity = { path = "../identity" }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+hex = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+sha2 = "0.10"

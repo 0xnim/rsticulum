@@ -1,0 +1,6 @@
+[package]
+name = "rsticulum-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
