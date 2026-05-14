@@ -1,0 +1,3 @@
+# Ignore generated node config directories
+nodes/
+__pycache__/

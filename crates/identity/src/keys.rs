@@ -59,6 +59,24 @@ impl Keys {
     pub fn encryption_secret(&self) -> &x25519_dalek::StaticSecret {
         &self.encryption
     }
+
+    /// Get the raw signing key bytes (for serialization).
+    pub fn signing_secret_bytes(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
+
+    /// Get the raw encryption secret bytes (for serialization).
+    pub fn encryption_secret_bytes(&self) -> [u8; 32] {
+        self.encryption.to_bytes()
+    }
+
+    /// Reconstruct Keys from raw secret bytes.
+    pub fn from_secrets(signing_bytes: [u8; 32], encryption_bytes: [u8; 32]) -> Self {
+        Keys {
+            signing: SigningKey::from_bytes(&signing_bytes),
+            encryption: x25519_dalek::StaticSecret::from(encryption_bytes),
+        }
+    }
 }
 
 impl std::fmt::Debug for Keys {

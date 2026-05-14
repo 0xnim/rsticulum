@@ -2,5 +2,27 @@
 name = "rsticulum-daemon"
 version.workspace = true
 edition.workspace = true
+license = "AGPL-3.0-only"
+description = "rsticulum network daemon — mesh routing + ICN forwarder"
+
+[[bin]]
+name = "rsticulumd"
+path = "src/main.rs"
 
 [dependencies]
+rsticulum-identity = { path = "../identity" }
+rsticulum-transport = { path = "../transport" }
+rsticulum-mesh = { path = "../mesh" }
+rsticulum-interface = { path = "../interface" }
+rsticulum-icn = { path = "../icn" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+hex = "0.4"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
