@@ -17,13 +17,13 @@ cryptographic mesh protocol for building resilient networks over any physical me
 | `rsticulum-backbone` | stub | SCION-inspired backbone |
 | `rsticulum-bridge` | stub | SCION edge bridge |
 | `rsticulum-icn` | 🟢 | ICN Interest/Data, FIB/PIT/CS/Strategy forwarder, manifest discovery, LinkFace |
-| `rsticulum-daemon` | stub | Network daemon |
+| `rsticulum-daemon` | 🟢 | Network daemon: identity mgmt, mesh integration, ICN forwarder |
 | `rsticulum-sdk` | stub | SDK |
 
 ## Tests
 
 ```
-76 passed (icn), 199 passed + 1 known HKDF fail (edge crates)
+61 passed (icn), 4 passed (daemon), 199 passed + 1 known HKDF fail (edge crates)
 ```
 
 Integration tests cross-validate against Python RNS for HKDF, token encryption,
