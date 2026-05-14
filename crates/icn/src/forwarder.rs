@@ -329,8 +329,8 @@ impl Forwarder {
                     if handles[i].is_finished() {
                         let handle = handles.remove(i);
                         match handle.await.unwrap() {
-                            (Ok(Some(data)), face_id) => {
-                                return Ok(Some::<(Data, FaceId)>((data, face_id)));
+                            (Ok(Some(data)), _face_id) => {
+                                return Ok(Some(data));
                             }
                             _ => continue,
                         }

@@ -88,45 +88,43 @@ impl Face for LinkFace {
     async fn express_interest(&self, interest: &Interest) -> Result<Option<Data>, String> {
         let interest_bytes = interest.to_bytes();
 
-        // Send Interest via Link
-        let mut link = self.link.lock().unwrap();
-        let _packet = link
-            .send(interest_bytes)
-            .map_err(|e| format!("send failed: {e}"))?;
+        // Send Interest via Link (brief lock)
+        let packet_bytes = {
+            let mut link = self.link.lock().unwrap();
+            let packet = link
+                .send(interest_bytes)
+                .map_err(|e| format!("send failed: {e}"))?;
+            packet.to_bytes()
+        };
 
-        // The packet needs to be routed externally — send to packet_tx
-        let _ = self.packet_tx.send(_packet.to_bytes());
+        // Route packet externally
+        let _ = self.packet_tx.send(packet_bytes);
 
-        // Wait for response
+        // Wait for response — loop: check recv, release lock, await notification
         let timeout = interest.lifetime;
         let notify = self.data_notify.clone();
 
         loop {
-            // Check for incoming data
-            if let Some(data_bytes) = link.recv() {
-                // Try to parse as Data
-                if let Ok(data) = Data::from_bytes(&data_bytes) {
-                    return Ok(Some(data));
+            // Check for incoming data (brief lock)
+            {
+                let mut link = self.link.lock().unwrap();
+                if let Some(data_bytes) = link.recv() {
+                    if let Ok(data) = Data::from_bytes(&data_bytes) {
+                        return Ok(Some(data));
+                    }
                 }
-                // Not ICN Data — could be other Link traffic, skip
-            }
-
-            // Release lock before waiting
-            drop(link);
+            } // lock dropped here
 
             // Wait for notification or timeout
             let sleep = tokio::time::sleep(timeout);
             tokio::select! {
                 _ = notify.notified() => {
-                    // Data may have arrived, loop back
+                    // Data may have arrived, loop back to check
                 }
                 _ = sleep => {
                     return Ok(None); // timeout
                 }
             }
-
-            // Re-acquire lock for next iteration
-            link = self.link.lock().unwrap();
         }
     }
 
@@ -173,8 +171,8 @@ mod tests {
         let addr_b = keys_b.rns_address();
 
         // Create destinations
-        let dest_a = Destination::new(keys_a.clone(), "test_app".to_string(), Vec::new()).unwrap();
-        let dest_b = Destination::new(keys_b.clone(), "test_app".to_string(), Vec::new()).unwrap();
+        let dest_a = Destination::new(keys_a.clone(), "test_app".to_string(), Vec::new(), 0);
+        let dest_b = Destination::new(keys_b.clone(), "test_app".to_string(), Vec::new(), 0);
 
         // Create two Links
         let config = LinkConfig::default();

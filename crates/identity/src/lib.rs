@@ -20,7 +20,10 @@ mod keys;
 mod rns_address;
 
 pub use address::Address;
-pub use crypto::{encrypt_packet, decrypt_packet, CryptoError, DerivedKey, Fernet, DERIVED_KEY_LEN, FERNET_OVERHEAD};
+pub use crypto::{
+    decrypt_packet, encrypt_packet, CryptoError, DerivedKey, Fernet, DERIVED_KEY_LEN,
+    FERNET_OVERHEAD,
+};
 pub use error::IdentityError;
 pub use identity_announce::IdentityAnnounce;
 pub use keys::Keys;

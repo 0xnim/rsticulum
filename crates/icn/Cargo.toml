@@ -9,6 +9,7 @@ description = "ICN application layer — Interest/Data content-addressed network
 rsticulum-identity = { path = "../identity" }
 rsticulum-crypto = { path = "../crypto" }
 rsticulum-transport = { path = "../transport" }
+rsticulum-packet = { path = "../packet" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
@@ -21,5 +22,4 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-rsticulum-packet = { path = "../packet" }
 rsticulum-destination = { path = "../destination" }

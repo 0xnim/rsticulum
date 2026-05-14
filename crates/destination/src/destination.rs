@@ -11,9 +11,9 @@
 //! dest_hash = SHA-256(name_hash + identity_hash)[:TRUNCATED_HASHLENGTH/8]
 //! ```
 
-use sha2::{Digest, Sha256};
 use rsticulum_identity::{Keys, RnsAddress};
 use rsticulum_packet::HASH_LENGTH;
+use sha2::{Digest, Sha256};
 
 /// Length of the name hash portion (RNS: NAME_HASH_LENGTH = 80 bits = 10 bytes).
 pub const NAME_HASH_LENGTH: usize = 10;

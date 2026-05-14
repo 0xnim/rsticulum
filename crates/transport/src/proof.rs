@@ -73,7 +73,10 @@ impl Proof {
         let mut signature = [0u8; PROOF_SIG_LEN];
         packet_hash.copy_from_slice(&bytes[..PROOF_HASH_LEN]);
         signature.copy_from_slice(&bytes[PROOF_HASH_LEN..]);
-        Ok(Self { packet_hash, signature })
+        Ok(Self {
+            packet_hash,
+            signature,
+        })
     }
 }
 
@@ -88,7 +91,10 @@ pub fn generate_proof(keys: &Keys, message: &[u8]) -> Proof {
     let sig = keys.sign(message);
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&sig.to_bytes());
-    Proof { packet_hash, signature }
+    Proof {
+        packet_hash,
+        signature,
+    }
 }
 
 /// Verify a proof against a known public key.

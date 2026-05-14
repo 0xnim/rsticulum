@@ -37,10 +37,10 @@
 use crate::error::TransportError;
 use crate::link::LinkConfig;
 use crate::proof::{generate_proof, Proof};
-use serde::{Deserialize, Serialize};
 use rsticulum_destination::Destination;
 use rsticulum_identity::{DerivedKey, RnsAddress};
 use rsticulum_packet::{Packet, DATA, DEST_LINK, HEADER_2, TRANSPORT_UNICAST};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -919,8 +919,7 @@ mod tests {
         link.resume().unwrap();
         link.establish().unwrap();
         let bob_proof2 = generate_proof(bob_keys, link.transport_id().as_slice());
-        link.complete_handshake(&bob_proof2.to_bytes())
-            .unwrap();
+        link.complete_handshake(&bob_proof2.to_bytes()).unwrap();
         link.close().unwrap();
 
         assert_eq!(link.state(), SuspendableState::Closed);

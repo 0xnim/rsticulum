@@ -6,8 +6,8 @@
 //!
 //! Matches Python RNS `PathRequest` and `PathResponse` semantics.
 
-use serde::{Deserialize, Serialize};
 use rsticulum_identity::RnsAddress;
+use serde::{Deserialize, Serialize};
 
 /// A path request — "Who can reach this destination?"
 ///

@@ -254,8 +254,8 @@ impl Drop for Fernet {
 // --- Public API on Keys ---
 
 use ed25519_dalek::VerifyingKey;
-use sha2::{Digest, Sha512};
 use rsticulum_crypto::{hkdf_sha256, Token};
+use sha2::{Digest, Sha512};
 
 use crate::Keys;
 
@@ -325,8 +325,8 @@ pub fn generate_ephemeral_x25519() -> (EphemeralSecret, PublicKey) {
 /// This is the standard Curve25519 bijection: Ed25519 uses twisted Edwards,
 /// X25519 uses Montgomery form. The conversion uses `VerifyingKey::to_montgomery()`.
 pub fn ed25519_pub_to_x25519(ed25519_pub: &[u8; 32]) -> Result<[u8; 32], CryptoError> {
-    let verifying_key = VerifyingKey::from_bytes(ed25519_pub)
-        .map_err(|_| CryptoError::Encryption)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(ed25519_pub).map_err(|_| CryptoError::Encryption)?;
     Ok(verifying_key.to_montgomery().to_bytes())
 }
 
@@ -429,8 +429,7 @@ pub fn decrypt_packet(
     let key: [u8; 32] = derived_key[..32].try_into().unwrap();
 
     // 5. Token.decrypt(token, derived_key) → plaintext
-    Token::decrypt(token_bytes, &key)
-        .map_err(|e| CryptoError::Decryption(e.to_string()))
+    Token::decrypt(token_bytes, &key).map_err(|e| CryptoError::Decryption(e.to_string()))
 }
 
 // --- Tests ---
@@ -620,13 +619,11 @@ mod tests {
         let hash = *recipient.rns_address().as_bytes();
 
         let msg = b"secret packet payload for delivery";
-        let encrypted =
-            encrypt_packet(msg, &sender, &recipient.identity_key_bytes(), &hash)
-                .expect("encrypt_packet");
+        let encrypted = encrypt_packet(msg, &sender, &recipient.identity_key_bytes(), &hash)
+            .expect("encrypt_packet");
         assert!(encrypted.len() > 32);
 
-        let decrypted =
-            decrypt_packet(&encrypted, &recipient, &hash).expect("decrypt_packet");
+        let decrypted = decrypt_packet(&encrypted, &recipient, &hash).expect("decrypt_packet");
         assert_eq!(decrypted, msg);
     }
 
@@ -638,9 +635,8 @@ mod tests {
         let hash = *alice.rns_address().as_bytes();
 
         let msg = b"secret for alice only";
-        let encrypted =
-            encrypt_packet(msg, &sender, &alice.identity_key_bytes(), &hash)
-                .expect("encrypt_packet");
+        let encrypted = encrypt_packet(msg, &sender, &alice.identity_key_bytes(), &hash)
+            .expect("encrypt_packet");
 
         // Eve tries to decrypt — should fail (different key)
         let eve_hash = *eve.rns_address().as_bytes();
@@ -653,11 +649,9 @@ mod tests {
         let recipient = Keys::generate();
         let hash = *recipient.rns_address().as_bytes();
 
-        let encrypted =
-            encrypt_packet(b"", &sender, &recipient.identity_key_bytes(), &hash)
-                .expect("encrypt empty");
-        let decrypted =
-            decrypt_packet(&encrypted, &recipient, &hash).expect("decrypt empty");
+        let encrypted = encrypt_packet(b"", &sender, &recipient.identity_key_bytes(), &hash)
+            .expect("encrypt empty");
+        let decrypted = decrypt_packet(&encrypted, &recipient, &hash).expect("decrypt empty");
         assert!(decrypted.is_empty());
     }
 
@@ -668,11 +662,9 @@ mod tests {
         let hash = *recipient.rns_address().as_bytes();
         let msg = vec![0xCD; 4096];
 
-        let encrypted =
-            encrypt_packet(&msg, &sender, &recipient.identity_key_bytes(), &hash)
-                .expect("encrypt large");
-        let decrypted =
-            decrypt_packet(&encrypted, &recipient, &hash).expect("decrypt large");
+        let encrypted = encrypt_packet(&msg, &sender, &recipient.identity_key_bytes(), &hash)
+            .expect("encrypt large");
+        let decrypted = decrypt_packet(&encrypted, &recipient, &hash).expect("decrypt large");
         assert_eq!(decrypted, msg);
     }
 
@@ -682,10 +674,10 @@ mod tests {
         let recipient = Keys::generate();
         let hash = *recipient.rns_address().as_bytes();
 
-        let enc1 = encrypt_packet(b"msg1", &sender, &recipient.identity_key_bytes(), &hash)
-            .expect("enc1");
-        let enc2 = encrypt_packet(b"msg1", &sender, &recipient.identity_key_bytes(), &hash)
-            .expect("enc2");
+        let enc1 =
+            encrypt_packet(b"msg1", &sender, &recipient.identity_key_bytes(), &hash).expect("enc1");
+        let enc2 =
+            encrypt_packet(b"msg1", &sender, &recipient.identity_key_bytes(), &hash).expect("enc2");
         assert_ne!(enc1, enc2);
     }
 
@@ -697,8 +689,7 @@ mod tests {
 
         let msg = b"tamper me";
         let mut encrypted =
-            encrypt_packet(msg, &sender, &recipient.identity_key_bytes(), &hash)
-                .expect("encrypt");
+            encrypt_packet(msg, &sender, &recipient.identity_key_bytes(), &hash).expect("encrypt");
 
         // Tamper with a byte in the token section (after ephemeral key)
         encrypted[40] ^= 0x01;

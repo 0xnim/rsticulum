@@ -54,8 +54,8 @@ impl Token {
         let ciphertext = buf;
 
         // 3. Compute HMAC-SHA256(signing_key, IV || ciphertext)
-        let mut mac = HmacSha256::new_from_slice(signing_key)
-            .expect("HMAC can take a key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(signing_key).expect("HMAC can take a key of any size");
         mac.update(&iv);
         mac.update(&ciphertext);
         let hmac = mac.finalize().into_bytes();
@@ -82,8 +82,8 @@ impl Token {
 
         // 1. Verify HMAC
         let signing_key = &key[..16];
-        let mut mac = HmacSha256::new_from_slice(signing_key)
-            .expect("HMAC can take a key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(signing_key).expect("HMAC can take a key of any size");
         mac.update(iv);
         mac.update(ciphertext);
         let computed_hmac = mac.finalize().into_bytes();

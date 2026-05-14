@@ -16,14 +16,14 @@ cryptographic mesh protocol for building resilient networks over any physical me
 | `rsticulum-mesh` | 🟢 | Hybrid routing: link-state + path discovery |
 | `rsticulum-backbone` | stub | SCION-inspired backbone |
 | `rsticulum-bridge` | stub | SCION edge bridge |
-| `rsticulum-icn` | stub | ICN application layer |
+| `rsticulum-icn` | 🟢 | ICN Interest/Data, FIB/PIT/CS/Strategy forwarder, manifest discovery, LinkFace |
 | `rsticulum-daemon` | stub | Network daemon |
 | `rsticulum-sdk` | stub | SDK |
 
 ## Tests
 
 ```
-199 passed, 1 failed (known HKDF RFC vector mismatch, Python interop correct)
+76 passed (icn), 199 passed + 1 known HKDF fail (edge crates)
 ```
 
 Integration tests cross-validate against Python RNS for HKDF, token encryption,
