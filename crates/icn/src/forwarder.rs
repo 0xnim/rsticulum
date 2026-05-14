@@ -142,6 +142,11 @@ impl Forwarder {
         self.key_store.insert(producer_hash, keys);
     }
 
+    /// Get a mutable reference to the ContentStore.
+    pub fn cs_mut(&mut self) -> &mut ContentStore {
+        &mut self.cs
+    }
+
     /// Get a reference to the ContentStore.
     pub fn cs(&self) -> &ContentStore {
         &self.cs

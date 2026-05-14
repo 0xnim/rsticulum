@@ -5,6 +5,10 @@ edition.workspace = true
 license = "AGPL-3.0-only"
 description = "ICN application layer — Interest/Data content-addressed networking on rsticulum"
 
+[[bin]]
+name = "icn-demo"
+path = "src/bin/demo.rs"
+
 [dependencies]
 rsticulum-identity = { path = "../identity" }
 rsticulum-crypto = { path = "../crypto" }
