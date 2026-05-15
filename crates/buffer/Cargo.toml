@@ -1,0 +1,15 @@
+[package]
+name = "rsticulum-buffer"
+version.workspace = true
+edition.workspace = true
+description = "RNS Buffer — streaming I/O over Channels"
+
+[dependencies]
+rsticulum-channel.workspace = true
+rsticulum-transport.workspace = true
+tokio.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+rsticulum-identity.workspace = true
+rsticulum-destination.workspace = true

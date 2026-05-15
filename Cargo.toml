@@ -15,6 +15,7 @@ members = [
     "crates/interface",
     "crates/backbone",
     "crates/bridge",
+    "crates/buffer",
     "crates/icn",
     "crates/channel",
     "crates/daemon",
@@ -33,6 +34,7 @@ rsticulum-identity = { path = "crates/identity" }
 rsticulum-packet = { path = "crates/packet" }
 rsticulum-destination = { path = "crates/destination" }
 rsticulum-channel = { path = "crates/channel" }
+rsticulum-buffer = { path = "crates/buffer" }
 rsticulum-mesh = { path = "crates/mesh" }
 rsticulum-transport = { path = "crates/transport" }
 rsticulum-interface = { path = "crates/interface" }
