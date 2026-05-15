@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 rsticulum-identity = { path = "../identity" }
 rsticulum-transport = { path = "../transport" }
+rsticulum-destination = { path = "../destination" }
+rsticulum-packet = { path = "../packet" }
 rsticulum-mesh = { path = "../mesh" }
 rsticulum-interface = { path = "../interface" }
 rsticulum-icn = { path = "../icn" }

@@ -1,34 +1,25 @@
-//! rsticulum-daemon — mesh networking + ICN forwarder.
+//! rsticulum-daemon — mesh networking + ICN forwarder + Link transport.
 //!
 //! The daemon ties together:
 //! - Identity management (keypair loading/generation/saving)
-//! - Mesh routing (UDP medium, MeshRouter, link discovery)
+//! - Link establishment (proof handshake, encrypted transport)
+//! - Mesh routing (UDP medium, MeshRouter, path discovery)
 //! - ICN forwarding (ContentStore, FIB/PIT, manifest serving)
+//! - Discovery (periodic announces, incoming announce handling)
 //! - Local API (TCP socket for applications)
-//!
-//! ## Architecture
-//! ```text
-//! ┌─────────────────────────────────────┐
-//! │           Local API (TCP)           │
-//! │   express / publish / register      │
-//! ├─────────────────────────────────────┤
-//! │         ICN Forwarder               │
-//! │   FIB / PIT / CS / Strategy         │
-//! ├─────────────────────────────────────┤
-//! │         Mesh Router                 │
-//! │   routing table / link discovery    │
-//! ├─────────────────────────────────────┤
-//! │         Transport                   │
-//! │   UDP medium / interfaces           │
-//! └─────────────────────────────────────┘
-//! ```
 
 pub mod config;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use rsticulum_destination::Destination;
 use rsticulum_identity::Keys;
-use rsticulum_mesh::{Medium, MeshRouter, UdpMedium};
+use rsticulum_mesh::{Medium, MeshRouter};
+use rsticulum_packet::{
+    Packet, ANNOUNCE, DATA, HEADER_2, LINKPROOF, PROOF,
+};
+use rsticulum_transport::Link;
 
 /// The daemon — holds all runtime state.
 pub struct Daemon {
@@ -40,6 +31,14 @@ pub struct Daemon {
     pub forwarder: rsticulum_icn::Forwarder,
     /// Active transport media.
     pub media: Vec<Arc<dyn Medium>>,
+    /// Established links, keyed by remote RNS address.
+    links: HashMap<rsticulum_identity::RnsAddress, Link>,
+    /// Pending links (handshake in progress).
+    pending_links: HashMap<rsticulum_identity::RnsAddress, Link>,
+    /// Known peer identity keys (from announces), for proof verification.
+    peer_keys: HashMap<rsticulum_identity::RnsAddress, [u8; 32]>,
+    /// Announce sequence counter.
+    announce_seq: u64,
 }
 
 impl Daemon {
@@ -52,6 +51,10 @@ impl Daemon {
             router,
             forwarder,
             media: Vec::new(),
+            links: HashMap::new(),
+            pending_links: HashMap::new(),
+            peer_keys: HashMap::new(),
+            announce_seq: 0,
         }
     }
 
@@ -60,12 +63,15 @@ impl Daemon {
         self.media.push(medium);
     }
 
-    /// Start the daemon: run the mesh + ICN event loop.
+    /// Register a known peer's identity key (from an announce or out-of-band).
+    pub fn register_peer(&mut self, addr: rsticulum_identity::RnsAddress, signing_key: [u8; 32]) {
+        self.peer_keys.insert(addr, signing_key);
+    }
+
+    /// Start the daemon: run the mesh + Link + ICN event loop.
     pub async fn run(&mut self) -> Result<(), DaemonError> {
-        tracing::info!(
-            "Daemon starting — local address: {}",
-            self.keys.rns_address()
-        );
+        let local_addr = self.keys.rns_address();
+        tracing::info!("Daemon starting — local address: {local_addr}");
 
         if self.media.is_empty() {
             tracing::warn!("No transport media configured — daemon has no network");
@@ -73,7 +79,7 @@ impl Daemon {
 
         // Main event loop
         loop {
-            // Receive from all media, collecting results before processing
+            // Collect frames from all media
             let mut frames = Vec::new();
             for medium in &self.media {
                 match medium.recv().await {
@@ -81,21 +87,34 @@ impl Daemon {
                         frames.push((from, frame));
                     }
                     Ok(None) => {
-                        tracing::info!("Medium {} closed", medium.name());
+                        tracing::debug!("Medium {} closed", medium.name());
                     }
                     Err(e) => {
-                        tracing::error!("Error receiving from {}: {}", medium.name(), e);
+                        tracing::error!("Error receiving from {}: {e}", medium.name());
                     }
                 }
             }
 
-            // Process frames (self is free to borrow mutably now)
             for (from, frame) in frames {
                 tracing::debug!("Received {} bytes from {}", frame.len(), from);
-                self.handle_frame(from, frame).await?;
+                if let Err(e) = self.handle_frame(from, frame).await {
+                    tracing::error!("Error handling frame from {from}: {e}");
+                }
             }
 
-            // Yield to avoid busy-looping
+            // Periodic: send announces
+            self.announce_seq = self.announce_seq.wrapping_add(1);
+            if self.announce_seq % 100 == 0 {
+                for medium in &self.media {
+                    let pkt = build_announce_packet(&self.keys);
+                    let data = pkt.to_bytes();
+                    let addr = self.keys.rns_address();
+                    if let Err(e) = medium.send(addr, &data).await {
+                        tracing::debug!("Announce send failed via {}: {e}", medium.name());
+                    }
+                }
+            }
+
             tokio::task::yield_now().await;
         }
     }
@@ -106,9 +125,155 @@ impl Daemon {
         from: rsticulum_identity::RnsAddress,
         frame: Vec<u8>,
     ) -> Result<(), DaemonError> {
-        // Try to parse as an ICN Interest or Data packet
-        // In a real daemon, the frame would be decrypted via Link first.
-        // For now, try direct parsing.
+        // Try to parse as an RNS packet
+        let packet = match Packet::from_bytes(&frame) {
+            Ok(pkt) => pkt,
+            Err(_) => {
+                // Not a valid packet — try ICN fallback
+                return self.handle_icn_frame(from, frame).await;
+            }
+        };
+
+        match packet.packet_type {
+            ANNOUNCE => {
+                self.handle_announce(from, &packet).await?;
+            }
+            PROOF => {
+                self.handle_proof(from, &packet).await?;
+            }
+            DATA if packet.header_type == HEADER_2 && packet.transport_id.is_some() => {
+                self.handle_link_data(from, &packet).await?;
+            }
+            _ => {
+                return self.handle_icn_frame(from, frame).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle an incoming announce packet.
+    async fn handle_announce(
+        &mut self,
+        from: rsticulum_identity::RnsAddress,
+        packet: &Packet,
+    ) -> Result<(), DaemonError> {
+        tracing::debug!("Received ANNOUNCE from {from}");
+
+        // Extract identity key from announce data if present
+        if packet.data.len() >= 32 {
+            let mut key_bytes = [0u8; 32];
+            key_bytes.copy_from_slice(&packet.data[..32]);
+            self.peer_keys.insert(from, key_bytes);
+            tracing::debug!("Registered peer key for {from}");
+        }
+
+        // Update mesh routing table (1-hop neighbor via this peer)
+        self.router.update_route(from, from, 1.0, 1);
+        Ok(())
+    }
+
+    /// Handle an incoming proof (link establishment) packet.
+    async fn handle_proof(
+        &mut self,
+        from: rsticulum_identity::RnsAddress,
+        packet: &Packet,
+    ) -> Result<(), DaemonError> {
+        tracing::debug!("Received PROOF from {from}");
+
+        // Check if we have the remote's signing key
+        let remote_key = match self.peer_keys.get(&from) {
+            Some(k) => *k,
+            None => {
+                tracing::debug!("No known peer key for {from} — ignoring proof");
+                return Ok(());
+            }
+        };
+
+        let local_dest = Destination::singleton(self.keys.clone(), "daemon", vec![]);
+
+        if packet.context == LINKPROOF {
+            // Remote is initiating a link to us
+            let mut link = Link::new(local_dest, from);
+            link.set_remote_signing_key(remote_key);
+
+            // We're the responder: verify their proof and generate a response
+            // The remote's proof is signed by them, and we verify against their key
+            // But handle_incoming_proof expects &Keys (full keypair).
+            // We only have the public key, so we complete_handshake instead.
+            match link.complete_handshake(&packet.data) {
+                Ok(()) => {
+                    // Generate our own proof to send back
+                    let our_proof = link.establish()?;
+                    self.links.insert(from, link);
+                    let reply_data = our_proof.to_bytes();
+                    self.send_to(from, &reply_data).await?;
+                    tracing::info!("Link established with {from} (responder)");
+                }
+                Err(e) => {
+                    tracing::debug!("Proof verification failed from {from}: {e}");
+                }
+            }
+        } else {
+            // Completing a handshake we initiated
+            if let Some(mut link) = self.pending_links.remove(&from) {
+                link.set_remote_signing_key(remote_key);
+                match link.complete_handshake(&packet.data) {
+                    Ok(()) => {
+                        self.links.insert(from, link);
+                        tracing::info!("Link established with {from} (initiator)");
+                    }
+                    Err(e) => {
+                        tracing::debug!("Handshake completion failed with {from}: {e}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle an incoming data packet on an established link.
+    async fn handle_link_data(
+        &mut self,
+        from: rsticulum_identity::RnsAddress,
+        packet: &Packet,
+    ) -> Result<(), DaemonError> {
+        // Collect messages first (avoids borrow conflict with send_to)
+        let messages: Vec<Vec<u8>> = {
+            if let Some(link) = self.links.get_mut(&from) {
+                link.deliver(packet)?;
+                let mut msgs = Vec::new();
+                while let Some(msg) = link.recv() {
+                    msgs.push(msg);
+                }
+                msgs
+            } else {
+                tracing::debug!("Data received from unknown link peer {from}");
+                return Ok(());
+            }
+        };
+
+        // Process collected messages
+        for msg in messages {
+            tracing::debug!("Link received {} bytes from {from}", msg.len());
+            if let Ok(data) = rsticulum_icn::Data::from_bytes(&msg) {
+                self.forwarder.receive_data(data, 0).await?;
+            } else if let Ok(interest) = rsticulum_icn::Interest::from_bytes(&msg) {
+                if let Ok(Some(data)) = self.forwarder.express(interest, 0).await {
+                    self.send_to(from, &data.to_bytes()).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// ICN fallback: try to parse as ICN Interest or Data.
+    async fn handle_icn_frame(
+        &mut self,
+        from: rsticulum_identity::RnsAddress,
+        frame: Vec<u8>,
+    ) -> Result<(), DaemonError> {
         if let Ok(data) = rsticulum_icn::Data::from_bytes(&frame) {
             tracing::debug!("Received ICN Data: {}", data.name);
             self.forwarder.receive_data(data, 0).await?;
@@ -117,16 +282,12 @@ impl Daemon {
 
         if let Ok(interest) = rsticulum_icn::Interest::from_bytes(&frame) {
             tracing::debug!("Received ICN Interest: {}", interest.name);
-            // Express the Interest locally — forwarder will check CS, FIB, etc.
-            // Use face ID 0 for "mesh face"
             if let Ok(Some(data)) = self.forwarder.express(interest, 0).await {
-                // Send Data back to requester
                 self.send_to(from, &data.to_bytes()).await?;
             }
             return Ok(());
         }
 
-        // Unknown frame type — log and ignore
         tracing::debug!("Unknown frame type from {}: {} bytes", from, frame.len());
         Ok(())
     }
@@ -137,19 +298,35 @@ impl Daemon {
         dest: rsticulum_identity::RnsAddress,
         data: &[u8],
     ) -> Result<(), DaemonError> {
-        // Try each medium
         for medium in &self.media {
             match medium.send(dest, data).await {
                 Ok(()) => return Ok(()),
-                Err(e) => tracing::debug!("Failed to send via {}: {}", medium.name(), e),
+                Err(e) => tracing::debug!("Failed to send via {}: {e}", medium.name()),
             }
         }
         Err(DaemonError::NoRoute)
     }
 
+    /// Initiate a link to a remote peer.
+    pub async fn connect(&mut self, remote: rsticulum_identity::RnsAddress) -> Result<(), DaemonError> {
+        if self.links.contains_key(&remote) || self.pending_links.contains_key(&remote) {
+            return Ok(());
+        }
+
+        let local_dest = Destination::singleton(self.keys.clone(), "daemon", vec![]);
+        let mut link = Link::new(local_dest, remote);
+
+        let proof_pkt = link.establish()?;
+        self.pending_links.insert(remote, link);
+
+        let data = proof_pkt.to_bytes();
+        self.send_to(remote, &data).await?;
+        tracing::info!("Link initiation sent to {remote}");
+        Ok(())
+    }
+
     /// Publish content to the local ICN forwarder.
     pub fn publish(&mut self, data: rsticulum_icn::Data) -> Result<(), DaemonError> {
-        // Verify and cache
         let name = data.name.clone();
         self.forwarder.cs_mut().insert(name, data);
         Ok(())
@@ -159,7 +336,14 @@ impl Daemon {
     pub fn add_route(&mut self, prefix: rsticulum_icn::Name, face_id: u64, cost: u8) {
         self.forwarder.add_route(prefix, face_id, cost);
     }
+
+    /// Number of established links.
+    pub fn link_count(&self) -> usize {
+        self.links.len()
+    }
 }
+
+// ── Error ──
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -169,6 +353,8 @@ pub enum DaemonError {
     Icn(String),
     #[error("mesh error: {0}")]
     Mesh(#[from] rsticulum_mesh::MeshError),
+    #[error("transport error: {0}")]
+    Transport(#[from] rsticulum_transport::TransportError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -179,9 +365,34 @@ impl From<String> for DaemonError {
     }
 }
 
+// ── Announce helper ──
+
+/// Build an ANNOUNCE packet advertising this daemon.
+fn build_announce_packet(keys: &Keys) -> Packet {
+    let identity_key = keys.identity_key_bytes();
+    let rns_addr = keys.rns_address();
+
+    Packet {
+        header_type: rsticulum_packet::HEADER_1,
+        context_flag: rsticulum_packet::FLAG_UNSET,
+        transport_type: rsticulum_packet::TRANSPORT_BROADCAST,
+        destination_type: rsticulum_packet::DEST_SINGLE,
+        packet_type: ANNOUNCE,
+        hops: 1,
+        destination_hash: *rns_addr.as_bytes(),
+        transport_id: None,
+        context: rsticulum_packet::NONE,
+        data: identity_key.to_vec(),
+    }
+}
+
+// ── Tests ──
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsticulum_identity::Keys;
+    use rsticulum_mesh::UdpMedium;
 
     #[test]
     fn test_daemon_creation() {
@@ -190,6 +401,7 @@ mod tests {
         assert_eq!(daemon.keys.rns_address(), keys.rns_address());
         assert_eq!(daemon.router.local_addr(), &keys.rns_address());
         assert!(daemon.media.is_empty());
+        assert_eq!(daemon.link_count(), 0);
     }
 
     #[tokio::test]
@@ -197,12 +409,35 @@ mod tests {
         let keys = Keys::generate();
         let mut daemon = Daemon::new(keys);
 
-        // Create a local UDP medium
         let medium = UdpMedium::bind("test", "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
 
         daemon.add_medium(Arc::new(medium));
         assert_eq!(daemon.media.len(), 1);
+    }
+
+    #[test]
+    fn test_announce_packet() {
+        let keys = Keys::generate();
+        let pkt = build_announce_packet(&keys);
+        assert_eq!(pkt.packet_type, ANNOUNCE);
+        assert_eq!(pkt.data.len(), 32); // identity key
+    }
+
+    #[test]
+    fn test_peer_registration() {
+        let keys = Keys::generate();
+        let mut daemon = Daemon::new(keys);
+        let peer = Keys::generate();
+        daemon.register_peer(peer.rns_address(), peer.identity_key_bytes());
+        assert!(daemon.peer_keys.contains_key(&peer.rns_address()));
+    }
+
+    #[test]
+    fn test_link_counts() {
+        let keys = Keys::generate();
+        let daemon = Daemon::new(keys);
+        assert_eq!(daemon.link_count(), 0);
     }
 }
