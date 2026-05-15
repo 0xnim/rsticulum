@@ -102,6 +102,20 @@ pub fn generate_proof(keys: &Keys, message: &[u8]) -> Proof {
 /// Recomputes `packet_hash = SHA-256(message)`, checks it matches
 /// the proof's claimed hash, then verifies the Ed25519 signature.
 pub fn verify_proof(keys: &Keys, message: &[u8], proof: &Proof) -> Result<(), ProofError> {
+    verify_proof_with_public_key(&keys.identity_key_bytes(), message, proof)
+}
+
+/// Verify a proof against a raw Ed25519 public key (for remote peer verification).
+///
+/// This is the interop path — when we receive a proof from a remote peer
+/// whose public key we know but whose full `Keys` we don't have.
+pub fn verify_proof_with_public_key(
+    public_key_bytes: &[u8; 32],
+    message: &[u8],
+    proof: &Proof,
+) -> Result<(), ProofError> {
+    use ed25519_dalek::VerifyingKey;
+
     // Recompute packet_hash
     let computed_hash: [u8; 32] = Sha256::digest(message).into();
 
@@ -109,8 +123,12 @@ pub fn verify_proof(keys: &Keys, message: &[u8], proof: &Proof) -> Result<(), Pr
         return Err(ProofError::HashMismatch);
     }
 
+    let verifying_key = VerifyingKey::from_bytes(public_key_bytes)
+        .map_err(|e| ProofError::InvalidFormat(format!("invalid public key: {e}")))?;
+
     let sig = Signature::from_bytes(&proof.signature);
-    keys.verify(message, &sig)
+    verifying_key
+        .verify_strict(message, &sig)
         .map_err(|_| ProofError::SignatureMismatch)
 }
 

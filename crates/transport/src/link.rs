@@ -12,7 +12,7 @@
 //! ```
 
 use crate::error::TransportError;
-use crate::proof::{generate_proof, verify_proof, Proof};
+use crate::proof::{generate_proof, verify_proof, verify_proof_with_public_key, Proof};
 use rsticulum_destination::Destination;
 use rsticulum_identity::{Keys, RnsAddress};
 use rsticulum_packet::{Packet, DATA, DEST_LINK, HEADER_2, TRANSPORT_UNICAST};
@@ -109,6 +109,9 @@ pub struct Link {
     /// The remote's X25519 encryption public key (set during handshake).
     /// When set, `send()` encrypts and `deliver()` decrypts automatically.
     remote_encryption_key: Option<[u8; 32]>,
+    /// The remote's Ed25519 signing (identity) public key.
+    /// Must be set before `complete_handshake()` for real interop.
+    remote_signing_key: Option<[u8; 32]>,
     /// Link configuration.
     config: LinkConfig,
     /// Current link state.
@@ -132,6 +135,7 @@ impl Link {
             local: Arc::new(local),
             remote,
             remote_encryption_key: None,
+            remote_signing_key: None,
             config: LinkConfig::default(),
             state: LinkState::Closed,
             transport_id,
@@ -147,6 +151,7 @@ impl Link {
             local: Arc::new(local),
             remote,
             remote_encryption_key: None,
+            remote_signing_key: None,
             config,
             state: LinkState::Closed,
             transport_id,
@@ -195,6 +200,14 @@ impl Link {
         self.remote_encryption_key = Some(key);
     }
 
+    /// Set the remote's Ed25519 signing (identity) public key.
+    ///
+    /// Required before `complete_handshake()` for real interop.
+    /// Without this, proof verification will fail against a remote peer.
+    pub fn set_remote_signing_key(&mut self, key: [u8; 32]) {
+        self.remote_signing_key = Some(key);
+    }
+
     /// Returns `true` if encryption is active on this link.
     pub fn is_encrypted(&self) -> bool {
         self.remote_encryption_key.is_some()
@@ -235,6 +248,9 @@ impl Link {
 
     /// Complete the handshake by verifying a proof received from the remote peer.
     ///
+    /// Requires `set_remote_signing_key()` to have been called first for real
+    /// interop. Falls back to local-key verification only for legacy self-tests.
+    ///
     /// Returns `Ok(())` if the proof is valid and the link transitions to Established.
     pub fn complete_handshake(&mut self, proof_bytes: &[u8]) -> Result<(), TransportError> {
         match self.state {
@@ -242,10 +258,23 @@ impl Link {
                 let proof = Proof::from_bytes(proof_bytes)
                     .map_err(|e| TransportError::ProofError(e.to_string()))?;
 
-                // Verify the proof (we use our own keys since this is a self-test model —
-                // in a real deployment, the remote's public key would be known out-of-band)
-                verify_proof(self.local.keys(), self.transport_id.as_slice(), &proof)
+                // Verify against remote signing key if set (real interop).
+                // Otherwise fall back to local-key verification (legacy self-test).
+                if let Some(ref remote_key) = self.remote_signing_key {
+                    verify_proof_with_public_key(
+                        remote_key,
+                        self.transport_id.as_slice(),
+                        &proof,
+                    )
                     .map_err(|_| TransportError::SignatureVerification)?;
+                } else {
+                    verify_proof(
+                        self.local.keys(),
+                        self.transport_id.as_slice(),
+                        &proof,
+                    )
+                    .map_err(|_| TransportError::SignatureVerification)?;
+                }
 
                 self.state = LinkState::Established;
                 Ok(())
@@ -558,7 +587,60 @@ mod tests {
         let remote_addr = *remote_dest.hash();
         let mut link = Link::new(local, remote_addr);
         let pkt = link.establish().unwrap();
+        // Self-test: no remote signing key set, falls back to local verification
         link.complete_handshake(&pkt.data).unwrap();
         link
+    }
+
+    #[test]
+    fn link_cross_key_handshake() {
+        // Alice initiates, Bob responds, Alice verifies with Bob's key
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let alice_dest = Destination::singleton(alice_keys.clone(), "alice", vec![]);
+        let bob_dest = Destination::singleton(bob_keys.clone(), "bob", vec![]);
+        let alice_addr = *alice_dest.hash();
+        let bob_addr = *bob_dest.hash();
+
+        // Alice → creates link to Bob, establishes (generates proof signed by alice)
+        let mut alice_link = Link::new(alice_dest, bob_addr);
+        let alice_proof_packet = alice_link.establish().unwrap();
+
+        // Bob → receives alice's proof, verifies with alice's public key
+        // handle_incoming_proof: remote_keys = the peer who sent the proof (alice)
+        let mut bob_link = Link::new(bob_dest, alice_addr);
+        let bob_response = bob_link
+            .handle_incoming_proof(&alice_keys, &alice_proof_packet.data)
+            .unwrap();
+
+        // Alice → completes handshake with Bob's response, using Bob's public key
+        alice_link.set_remote_signing_key(bob_keys.identity_key_bytes());
+        alice_link
+            .complete_handshake(&bob_response.data)
+            .unwrap();
+
+        assert!(alice_link.is_established());
+        assert!(bob_link.is_established());
+    }
+
+    #[test]
+    fn link_cross_key_wrong_signing_key_fails() {
+        let alice_keys = Keys::generate();
+        let bob_keys = Keys::generate();
+        let eve_keys = Keys::generate();
+        let alice_dest = Destination::singleton(alice_keys.clone(), "alice", vec![]);
+        let bob_addr = *Destination::singleton(bob_keys.clone(), "bob", vec![]).hash();
+
+        let mut alice_link = Link::new(alice_dest, bob_addr);
+        alice_link.establish().unwrap();
+
+        // Set Eve's key instead of Bob's — should fail
+        alice_link.set_remote_signing_key(eve_keys.identity_key_bytes());
+
+        let proof_bytes = generate_proof(&bob_keys, alice_link.transport_id.as_slice());
+        let err = alice_link
+            .complete_handshake(&proof_bytes.to_bytes())
+            .unwrap_err();
+        assert!(matches!(err, TransportError::SignatureVerification));
     }
 }
