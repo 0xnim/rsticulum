@@ -409,25 +409,28 @@ difficulty; if `0x02`, they stop non-essential traffic entirely.
 ```
 Phase               Layer               Deliverable
 ────────────────────────────────────────────────────────────────
-1. Identity         Cross-layer        Identity lifecycle protocol
-                                       (rsticulum-identity-lifecycle)
+1. rsticulum        Edge + Transport    Full Rust Reticulum impl
+                                       Wire-compatible with Python RNS
+                                       (crates: identity, packet, transport,
+                                        destination, interface, mesh, channel,
+                                        buffer, crypto, daemon)
 
-2. Edge             Reticulum          SuspendableLink as default
-                                       Hierarchical announce forwarding
-                                       Proof-of-work anti-spam
+2. Protocol         Edge + Transport    SuspendableLink as default
+   Evolution                            Hierarchical announce forwarding
+                                        Proof-of-work anti-spam
+                                        Key delegation
 
-3. Backbone         SCION-similar      Identity-based forwarding
-                                       Long-lived path segments
-                                       Membership-based trust
-                                       Bridge protocol spec
+3. Identity         Cross-layer         Identity lifecycle protocol
+                                       (publication, rotation, revocation,
+                                        delegation chain management)
 
 4. Application      ICN                Extended PIT lifetimes
                                        Manifest system
                                        Subscription Interests
-                                       WASM module type
+                                       WASM module type + runtime
 
-5. Integration      Bridge             Unified addressing table
-                                       Rate-limited congestion signalling
-                                       Edge↔backbone packet translation
-                                       End-to-end demo (mesh ↔ backbone)
+5. Scaling          Backbone           Identity-based forwarding
+                                       Long-lived path segments
+                                       Bridge protocol
+                                       Multi-mesh routing
 ```
