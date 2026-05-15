@@ -1,0 +1,16 @@
+[package]
+name = "rsticulum-channel"
+version.workspace = true
+edition.workspace = true
+description = "RNS Channel — reliable in-order messages over Links"
+
+[dependencies]
+rsticulum-transport.workspace = true
+rsticulum-identity.workspace = true
+rsticulum-packet.workspace = true
+tokio.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+rsticulum-destination.workspace = true
+rsticulum-packet.workspace = true

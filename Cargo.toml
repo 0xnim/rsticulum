@@ -16,6 +16,7 @@ members = [
     "crates/backbone",
     "crates/bridge",
     "crates/icn",
+    "crates/channel",
     "crates/daemon",
     "crates/sdk",
     "crates/crypto",
@@ -31,6 +32,7 @@ license = "MIT"
 rsticulum-identity = { path = "crates/identity" }
 rsticulum-packet = { path = "crates/packet" }
 rsticulum-destination = { path = "crates/destination" }
+rsticulum-channel = { path = "crates/channel" }
 rsticulum-mesh = { path = "crates/mesh" }
 rsticulum-transport = { path = "crates/transport" }
 rsticulum-interface = { path = "crates/interface" }
