@@ -66,7 +66,7 @@ pub const RESOURCE_HMU: u8 = 0xFE;
 pub const LINKIDENTITY: u8 = 0xFB;
 pub const LINKCLOSE: u8 = 0xFC;
 pub const LINKPROOF: u8 = 0xFD;
-pub const KEEPALIVE: u8 = 0xFA;
+pub const KEEPALIVE: u8 = 0x06;
 pub const LRPROOF: u8 = 0xFF;
 
 /// Context constant for path requests (DATA packets used for path discovery).

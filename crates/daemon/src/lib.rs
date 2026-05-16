@@ -25,11 +25,12 @@ use rsticulum_identity::Keys;
 use rsticulum_mesh::{Medium, MeshRouter};
 use rsticulum_mesh::path_request::{PathRequest, PathReply, handle_path_request, handle_path_reply};
 use rsticulum_packet::{
-    Packet, ANNOUNCE, DATA, HEADER_2, LINKPROOF, LINKREQUEST, PROOF,
+    Packet, ANNOUNCE, DATA, HEADER_2, KEEPALIVE, LINKPROOF, LINKREQUEST, PROOF,
     PATH_REQUEST as PATH_REQ_CTX, PATH_RESPONSE,
 };
 use rsticulum_transport::{Link, Resource, ResourceConfig};
 use rsticulum_transport::Proof;
+use rsticulum_transport::{KEEPALIVE_INTERVAL, STALE_TIME, TRAFFIC_TIMEOUT};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::api::ApiCommand;
@@ -242,6 +243,64 @@ impl Daemon {
                             .send(self.send_resource(addr, data).await.map_err(|e| e.to_string()));
                     }
                 }
+            }
+
+            // Periodic: keepalive monitoring for established links
+            let now = std::time::Instant::now();
+            let mut dead_links = Vec::new();
+            let mut keepalive_packets: Vec<(rsticulum_identity::RnsAddress, Vec<u8>)> = Vec::new();
+            for (&addr, channel) in &self.channels {
+                let link = channel.link();
+                if !link.keepalive_enabled() {
+                    continue;
+                }
+                let last_inbound = link.last_inbound();
+                let last_outbound = link.last_outbound();
+
+                if now.duration_since(last_inbound) > STALE_TIME {
+                    dead_links.push(addr);
+                    tracing::warn!("Link to {addr} stale, closing");
+                } else if now.duration_since(last_inbound) > TRAFFIC_TIMEOUT {
+                    // No inbound traffic for TRAFFIC_TIMEOUT — send a probe
+                    tracing::debug!("Link to {addr} no inbound traffic, sending probe");
+                    let packet = Packet {
+                        header_type: HEADER_2,
+                        context_flag: rsticulum_packet::FLAG_UNSET,
+                        transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+                        destination_type: rsticulum_packet::DEST_LINK,
+                        packet_type: DATA,
+                        hops: rsticulum_packet::MAX_HOPS,
+                        destination_hash: *addr.as_bytes(),
+                        transport_id: Some(*link.transport_id()),
+                        context: rsticulum_packet::NONE,
+                        data: vec![],
+                    };
+                    keepalive_packets.push((addr, packet.to_bytes()));
+                } else if now.duration_since(last_outbound) > KEEPALIVE_INTERVAL {
+                    // No outbound traffic for KEEPALIVE_INTERVAL — send keepalive
+                    tracing::trace!("Sending KEEPALIVE to {addr}");
+                    let packet = Packet {
+                        header_type: HEADER_2,
+                        context_flag: rsticulum_packet::FLAG_SET,
+                        transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+                        destination_type: rsticulum_packet::DEST_LINK,
+                        packet_type: DATA,
+                        hops: rsticulum_packet::MAX_HOPS,
+                        destination_hash: *addr.as_bytes(),
+                        transport_id: Some(*link.transport_id()),
+                        context: KEEPALIVE,
+                        data: vec![],
+                    };
+                    keepalive_packets.push((addr, packet.to_bytes()));
+                }
+            }
+            // Remove stale links
+            for addr in dead_links {
+                self.channels.remove(&addr);
+            }
+            // Send keepalive/probe packets
+            for (addr, data) in keepalive_packets {
+                let _ = self.send_to(addr, &data).await;
             }
 
             tokio::task::yield_now().await;
@@ -916,6 +975,16 @@ impl Daemon {
         from: rsticulum_identity::RnsAddress,
         packet: &Packet,
     ) -> Result<(), DaemonError> {
+        // Handle KEEPALIVE packets — just update last_inbound via deliver()
+        if packet.context == KEEPALIVE {
+            if let Some(channel) = self.channels.get_mut(&from) {
+                // deliver() updates last_inbound on the link
+                let _ = channel.link_mut().deliver(packet);
+                tracing::trace!("Keepalive received from {from}");
+            }
+            return Ok(());
+        }
+
         // Collect messages first (avoids borrow conflict with send_to)
         let messages: Vec<Vec<u8>> = {
             if let Some(channel) = self.channels.get_mut(&from) {

@@ -21,6 +21,7 @@ use rsticulum_identity::{Keys, RnsAddress};
 use rsticulum_packet::{Packet, DATA, DEST_LINK, HEADER_2, TRANSPORT_UNICAST};
 use sha2::Sha256;
 use std::sync::Arc;
+use std::time::Instant;
 
 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -138,6 +139,12 @@ pub struct Link {
     inbound: Vec<Vec<u8>>,
     /// Outbound message buffer (for send).
     outbound: Vec<Packet>,
+    /// Last time any data was received on this link.
+    last_inbound: Instant,
+    /// Last time any data was sent on this link.
+    last_outbound: Instant,
+    /// Whether keepalive is enabled for this link.
+    keepalive_enabled: bool,
 }
 
 impl Link {
@@ -147,6 +154,7 @@ impl Link {
     /// XOR'd together to produce a deterministic but unique identifier.
     pub fn new(local: Destination, remote: RnsAddress) -> Self {
         let transport_id = Self::derive_transport_id(local.hash(), &remote);
+        let now = Instant::now();
         Self {
             local: Arc::new(local),
             remote,
@@ -160,12 +168,16 @@ impl Link {
             initiator: false,
             inbound: Vec::new(),
             outbound: Vec::new(),
+            last_inbound: now,
+            last_outbound: now,
+            keepalive_enabled: true,
         }
     }
 
     /// Create a new Link with custom configuration.
     pub fn with_config(local: Destination, remote: RnsAddress, config: LinkConfig) -> Self {
         let transport_id = Self::derive_transport_id(local.hash(), &remote);
+        let now = Instant::now();
         Self {
             local: Arc::new(local),
             remote,
@@ -179,6 +191,9 @@ impl Link {
             initiator: false,
             inbound: Vec::new(),
             outbound: Vec::new(),
+            last_inbound: now,
+            last_outbound: now,
+            keepalive_enabled: true,
         }
     }
 
@@ -253,6 +268,26 @@ impl Link {
     /// Returns `true` if encryption is active on this link.
     pub fn is_encrypted(&self) -> bool {
         self.remote_encryption_key.is_some() || self.shared_key.is_some()
+    }
+
+    /// When any data was last received on this link.
+    pub fn last_inbound(&self) -> Instant {
+        self.last_inbound
+    }
+
+    /// When any data was last sent on this link.
+    pub fn last_outbound(&self) -> Instant {
+        self.last_outbound
+    }
+
+    /// Whether keepalive is enabled on this link.
+    pub fn keepalive_enabled(&self) -> bool {
+        self.keepalive_enabled
+    }
+
+    /// Enable or disable keepalive for this link.
+    pub fn set_keepalive_enabled(&mut self, enabled: bool) {
+        self.keepalive_enabled = enabled;
     }
 
     /// Set the ECDH-derived shared key from LINKREQUEST handshake.
@@ -443,6 +478,7 @@ impl Link {
         };
 
         self.outbound.push(packet.clone());
+        self.last_outbound = Instant::now();
         Ok(packet)
     }
 
@@ -474,6 +510,7 @@ impl Link {
         };
 
         self.inbound.push(data);
+        self.last_inbound = Instant::now();
         Ok(())
     }
 
