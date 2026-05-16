@@ -17,6 +17,7 @@ mod crypto;
 mod error;
 mod identity_announce;
 mod keys;
+mod ratchet_store;
 mod rns_address;
 
 pub use address::Address;
