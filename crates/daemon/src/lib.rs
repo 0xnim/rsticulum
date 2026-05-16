@@ -26,6 +26,7 @@ use rsticulum_mesh::{Medium, MeshRouter};
 use rsticulum_mesh::path_request::{PathRequest, PathReply, handle_path_request, handle_path_reply};
 use rsticulum_packet::{
     Packet, ANNOUNCE, DATA, HEADER_2, KEEPALIVE, LINKPROOF, LINKREQUEST, LRRTT, PROOF,
+    RATCHET,
     PATH_REQUEST as PATH_REQ_CTX, PATH_RESPONSE,
 };
 use rsticulum_transport::{Link, Resource, ResourceConfig};
@@ -298,8 +299,42 @@ impl Daemon {
             for addr in dead_links {
                 self.channels.remove(&addr);
             }
+            // Send pending ratchet keys (needs mutable access, separate pass)
+            let mut ratchet_packets: Vec<(rsticulum_identity::RnsAddress, Vec<u8>)> = Vec::new();
+            for (&addr, channel) in &mut self.channels {
+                if channel.link().ratchet_pending_send() {
+                    if let Some(ratchet_priv_bytes) = channel.link().ratchet_priv() {
+                        let ratchet_priv_key = x25519_dalek::StaticSecret::from(ratchet_priv_bytes);
+                        let ratchet_pub = x25519_dalek::PublicKey::from(&ratchet_priv_key);
+                        let seq = channel.link().ratchet_sequence();
+                        let mut ratchet_data = ratchet_pub.to_bytes().to_vec();
+                        ratchet_data.extend_from_slice(&seq.to_le_bytes());
+
+                        let packet = Packet {
+                            header_type: HEADER_2,
+                            context_flag: rsticulum_packet::FLAG_SET,
+                            transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+                            destination_type: rsticulum_packet::DEST_LINK,
+                            packet_type: DATA,
+                            hops: rsticulum_packet::MAX_HOPS,
+                            destination_hash: *addr.as_bytes(),
+                            transport_id: Some(*channel.link().transport_id()),
+                            context: RATCHET,
+                            data: ratchet_data,
+                        };
+                        tracing::debug!("Sending ratchet key to {addr}, seq={seq}");
+                        ratchet_packets.push((addr, packet.to_bytes()));
+                        channel.link_mut().set_ratchet_pending_send(false);
+                        channel.link_mut().increment_ratchet_sequence();
+                    }
+                }
+            }
             // Send keepalive/probe packets
             for (addr, data) in keepalive_packets {
+                let _ = self.send_to(addr, &data).await;
+            }
+            // Send ratchet packets
+            for (addr, data) in ratchet_packets {
                 let _ = self.send_to(addr, &data).await;
             }
 
@@ -837,6 +872,11 @@ impl Daemon {
             channel.link_mut().set_remote_signing_key(remote_key);
             channel.link_mut().set_state(rsticulum_transport::LinkState::Established);
 
+            // Generate ratchet keypair for forward secrecy (initiator side)
+            let ratchet_priv = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+            channel.link_mut().set_ratchet_priv(ratchet_priv.to_bytes());
+            channel.link_mut().set_ratchet_pending_send(true);
+
             // Compute RTT: time since LINKREQUEST was sent (link creation)
             let now = std::time::Instant::now();
             let rtt_ms = now.duration_since(channel.link().established_at()).as_secs_f64() * 1000.0;
@@ -966,6 +1006,11 @@ impl Daemon {
         link.set_shared_key(shared_key);
         link.set_state(rsticulum_transport::LinkState::Established);
 
+        // Generate ratchet keypair for forward secrecy (responder side)
+        let ratchet_priv = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        link.set_ratchet_priv(ratchet_priv.to_bytes());
+        link.set_ratchet_pending_send(true);
+
         // Compute establishment cost: time since link was created
         let now = std::time::Instant::now();
         let cost_ms = now.duration_since(link.established_at()).as_secs_f64() * 1000.0;
@@ -1021,6 +1066,47 @@ impl Daemon {
                 if let Some(channel) = self.channels.get_mut(&from) {
                     channel.link_mut().set_rtt(Some(rtt));
                     tracing::debug!("RTT measured from {from}: {rtt:.1}ms");
+                }
+            }
+            return Ok(());
+        }
+
+        // Handle RATCHET packets — receive peer's ratchet public key for forward secrecy
+        if packet.context == RATCHET {
+            if packet.data.len() >= 36 {
+                let mut peer_ratchet_key = [0u8; 32];
+                peer_ratchet_key.copy_from_slice(&packet.data[..32]);
+                let seq = u32::from_le_bytes(packet.data[32..36].try_into().unwrap());
+
+                if let Some(channel) = self.channels.get_mut(&from) {
+                    channel.link_mut().set_peer_ratchet_key(peer_ratchet_key);
+
+                    // If we have our ratchet private key, derive new shared key
+                    if let Some(ratchet_priv_bytes) = channel.link().ratchet_priv() {
+                        let ratchet_priv_key = x25519_dalek::StaticSecret::from(ratchet_priv_bytes);
+                        let peer_pub = x25519_dalek::PublicKey::from(peer_ratchet_key);
+                        let shared_ratchet = ratchet_priv_key.diffie_hellman(&peer_pub);
+                        let shared_ratchet_bytes = shared_ratchet.to_bytes();
+
+                        // Derive new shared_key from existing shared_key + ratchet secret
+                        if let Some(existing_shared) = channel.link().shared_key() {
+                            let new_shared = rsticulum_crypto::hkdf_sha256(
+                                32,
+                                existing_shared,
+                                Some(&shared_ratchet_bytes),
+                                Some(b"ratchet"),
+                            );
+                            let mut new_key = [0u8; 32];
+                            new_key.copy_from_slice(&new_shared);
+                            channel.link_mut().set_shared_key(new_key);
+                            tracing::info!(
+                                "Ratchet rotation completed with {from}, seq={seq}"
+                            );
+                        }
+                    }
+
+                    // Send our ratchet key back if we have one pending
+                    channel.link_mut().set_ratchet_pending_send(true);
                 }
             }
             return Ok(());

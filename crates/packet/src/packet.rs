@@ -70,6 +70,9 @@ pub const KEEPALIVE: u8 = 0x06;
 pub const LRRTT: u8 = 0x07;
 pub const LRPROOF: u8 = 0xFF;
 
+/// Context constant for ratchet key rotation (forward secrecy).
+pub const RATCHET: u8 = 0x0A;
+
 /// Context constant for path requests (DATA packets used for path discovery).
 pub const PATH_REQUEST: u8 = 0x01;
 

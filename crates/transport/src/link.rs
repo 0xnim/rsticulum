@@ -153,6 +153,14 @@ pub struct Link {
     establishment_cost: Option<f64>,
     /// Number of link establishment attempts.
     establishment_attempts: u32,
+    /// Our ratchet private key (X25519 raw bytes), for forward-secrecy key rotation.
+    ratchet_priv: Option<[u8; 32]>,
+    /// Peer's ratchet public key received from them.
+    peer_ratchet_key: Option<[u8; 32]>,
+    /// Ratchet rotation counter incremented on each rotation.
+    ratchet_sequence: u32,
+    /// Whether we need to send our ratchet public key to the peer.
+    ratchet_pending_send: bool,
 }
 
 impl Link {
@@ -183,6 +191,10 @@ impl Link {
             established_at: now,
             establishment_cost: None,
             establishment_attempts: 0,
+            ratchet_priv: None,
+            peer_ratchet_key: None,
+            ratchet_sequence: 0,
+            ratchet_pending_send: false,
         }
     }
 
@@ -210,6 +222,10 @@ impl Link {
             established_at: now,
             establishment_cost: None,
             establishment_attempts: 0,
+            ratchet_priv: None,
+            peer_ratchet_key: None,
+            ratchet_sequence: 0,
+            ratchet_pending_send: false,
         }
     }
 
@@ -339,6 +355,49 @@ impl Link {
     /// Record a link establishment attempt (increments the counter).
     pub fn record_establishment_attempt(&mut self) {
         self.establishment_attempts += 1;
+    }
+
+    // ── Ratchet (forward secrecy) ──
+
+    /// Set our ratchet private key (X25519 raw bytes). Generated after link establishment.
+    pub fn set_ratchet_priv(&mut self, priv_key: [u8; 32]) {
+        self.ratchet_priv = Some(priv_key);
+    }
+
+    /// Get our ratchet private key, if set.
+    pub fn ratchet_priv(&self) -> Option<[u8; 32]> {
+        self.ratchet_priv
+    }
+
+    /// Set the peer's ratchet public key (received from them).
+    pub fn set_peer_ratchet_key(&mut self, key: [u8; 32]) {
+        self.peer_ratchet_key = Some(key);
+    }
+
+    /// Get the peer's ratchet public key, if set.
+    pub fn peer_ratchet_key(&self) -> Option<[u8; 32]> {
+        self.peer_ratchet_key
+    }
+
+    /// Current ratchet sequence counter.
+    pub fn ratchet_sequence(&self) -> u32 {
+        self.ratchet_sequence
+    }
+
+    /// Increment the ratchet sequence counter and return the new value.
+    pub fn increment_ratchet_sequence(&mut self) -> u32 {
+        self.ratchet_sequence = self.ratchet_sequence.wrapping_add(1);
+        self.ratchet_sequence
+    }
+
+    /// Set whether we need to send our ratchet key to the peer.
+    pub fn set_ratchet_pending_send(&mut self, pending: bool) {
+        self.ratchet_pending_send = pending;
+    }
+
+    /// Whether we need to send our ratchet key to the peer.
+    pub fn ratchet_pending_send(&self) -> bool {
+        self.ratchet_pending_send
     }
 
     /// Set the ECDH-derived shared key from LINKREQUEST handshake.
