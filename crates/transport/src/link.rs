@@ -145,6 +145,14 @@ pub struct Link {
     last_outbound: Instant,
     /// Whether keepalive is enabled for this link.
     keepalive_enabled: bool,
+    /// Round-trip time measurement in milliseconds (set when link becomes ACTIVE).
+    rtt: Option<f64>,
+    /// Time when the link was first created (set in constructors).
+    established_at: Instant,
+    /// Establishment cost: time from first packet to active in milliseconds.
+    establishment_cost: Option<f64>,
+    /// Number of link establishment attempts.
+    establishment_attempts: u32,
 }
 
 impl Link {
@@ -171,6 +179,10 @@ impl Link {
             last_inbound: now,
             last_outbound: now,
             keepalive_enabled: true,
+            rtt: None,
+            established_at: now,
+            establishment_cost: None,
+            establishment_attempts: 0,
         }
     }
 
@@ -194,6 +206,10 @@ impl Link {
             last_inbound: now,
             last_outbound: now,
             keepalive_enabled: true,
+            rtt: None,
+            established_at: now,
+            establishment_cost: None,
+            establishment_attempts: 0,
         }
     }
 
@@ -288,6 +304,41 @@ impl Link {
     /// Enable or disable keepalive for this link.
     pub fn set_keepalive_enabled(&mut self, enabled: bool) {
         self.keepalive_enabled = enabled;
+    }
+
+    /// Latest round-trip time in milliseconds, if measured.
+    pub fn rtt(&self) -> Option<f64> {
+        self.rtt
+    }
+
+    /// Set the round-trip time measurement.
+    pub fn set_rtt(&mut self, rtt: Option<f64>) {
+        self.rtt = rtt;
+    }
+
+    /// Time when the link was created (set in constructors).
+    pub fn established_at(&self) -> Instant {
+        self.established_at
+    }
+
+    /// Establishment cost: time from link creation to active in milliseconds.
+    pub fn establishment_cost(&self) -> Option<f64> {
+        self.establishment_cost
+    }
+
+    /// Set the establishment cost.
+    pub fn set_establishment_cost(&mut self, cost: Option<f64>) {
+        self.establishment_cost = cost;
+    }
+
+    /// Number of link establishment attempts.
+    pub fn establishment_attempts(&self) -> u32 {
+        self.establishment_attempts
+    }
+
+    /// Record a link establishment attempt (increments the counter).
+    pub fn record_establishment_attempt(&mut self) {
+        self.establishment_attempts += 1;
     }
 
     /// Set the ECDH-derived shared key from LINKREQUEST handshake.

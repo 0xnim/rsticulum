@@ -25,7 +25,7 @@ use rsticulum_identity::Keys;
 use rsticulum_mesh::{Medium, MeshRouter};
 use rsticulum_mesh::path_request::{PathRequest, PathReply, handle_path_request, handle_path_reply};
 use rsticulum_packet::{
-    Packet, ANNOUNCE, DATA, HEADER_2, KEEPALIVE, LINKPROOF, LINKREQUEST, PROOF,
+    Packet, ANNOUNCE, DATA, HEADER_2, KEEPALIVE, LINKPROOF, LINKREQUEST, LRRTT, PROOF,
     PATH_REQUEST as PATH_REQ_CTX, PATH_RESPONSE,
 };
 use rsticulum_transport::{Link, Resource, ResourceConfig};
@@ -836,6 +836,29 @@ impl Daemon {
             channel.link_mut().set_shared_key(shared_key);
             channel.link_mut().set_remote_signing_key(remote_key);
             channel.link_mut().set_state(rsticulum_transport::LinkState::Established);
+
+            // Compute RTT: time since LINKREQUEST was sent (link creation)
+            let now = std::time::Instant::now();
+            let rtt_ms = now.duration_since(channel.link().established_at()).as_secs_f64() * 1000.0;
+            channel.link_mut().set_rtt(Some(rtt_ms));
+            channel.link_mut().set_establishment_cost(Some(rtt_ms));
+            tracing::debug!("RTT to {actual_from}: {rtt_ms:.1}ms");
+
+            // Send RTT probe (LRRTT context packet) after establishment
+            let rtt_probe = rsticulum_packet::Packet {
+                header_type: rsticulum_packet::HEADER_2,
+                context_flag: rsticulum_packet::FLAG_SET,
+                transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+                destination_type: rsticulum_packet::DEST_LINK,
+                packet_type: rsticulum_packet::DATA,
+                hops: rsticulum_packet::MAX_HOPS,
+                destination_hash: *actual_from.as_bytes(),
+                transport_id: Some(*channel.link().transport_id()),
+                context: LRRTT,
+                data: rtt_ms.to_le_bytes().to_vec(),
+            };
+            let _ = self.send_to(actual_from, &rtt_probe.to_bytes()).await;
+
             self.channels.insert(actual_from, channel);
 
             tracing::info!(
@@ -943,6 +966,12 @@ impl Daemon {
         link.set_shared_key(shared_key);
         link.set_state(rsticulum_transport::LinkState::Established);
 
+        // Compute establishment cost: time since link was created
+        let now = std::time::Instant::now();
+        let cost_ms = now.duration_since(link.established_at()).as_secs_f64() * 1000.0;
+        link.set_establishment_cost(Some(cost_ms));
+        tracing::debug!("Establishment cost for {from}: {cost_ms:.1}ms");
+
         let channel = Channel::new(link);
         self.channels.insert(from, channel);
 
@@ -981,6 +1010,18 @@ impl Daemon {
                 // deliver() updates last_inbound on the link
                 let _ = channel.link_mut().deliver(packet);
                 tracing::trace!("Keepalive received from {from}");
+            }
+            return Ok(());
+        }
+
+        // Handle LRRTT packets — record RTT measurement from peer
+        if packet.context == LRRTT {
+            if packet.data.len() >= 8 {
+                let rtt = f64::from_le_bytes(packet.data[..8].try_into().unwrap());
+                if let Some(channel) = self.channels.get_mut(&from) {
+                    channel.link_mut().set_rtt(Some(rtt));
+                    tracing::debug!("RTT measured from {from}: {rtt:.1}ms");
+                }
             }
             return Ok(());
         }
