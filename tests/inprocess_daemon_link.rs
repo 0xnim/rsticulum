@@ -86,32 +86,35 @@ async fn inprocess_link_establishment() {
         panic!("A did not receive B's announce: {result:?}");
     }
 
-    println!("=== A connecting to B ===");
+    println!("=== A connecting to B ===\n");
+    println!("A sends LINKREQUEST to B...");
     let connect_result = daemon_a.connect(addr_b).await;
     println!("connect: {connect_result:?}");
     assert!(connect_result.is_ok(), "connect should succeed");
 
-    // B receives and processes the link proof
+    // B receives and processes the LINKREQUEST
     tokio::time::sleep(Duration::from_millis(200)).await;
     let result = daemon_b.media[0].recv().await;
-    println!("B proof recv: {result:?}");
+    println!("B recv: {result:?}");
     if let Ok(Some((from, frame))) = result {
         let pkt = P::Packet::from_bytes(&frame).unwrap();
-        println!("B: proof pkt type={}, context={:#04x}, len={}", pkt.packet_type, pkt.context, pkt.data.len());
+        println!("B: LINKREQUEST pkt type={}, data_len={}", pkt.packet_type, pkt.data.len());
+        // The daemon's handle_frame dispatches LINKREQUEST → handle_linkrequest
         daemon_b.handle_frame(from, frame).await.unwrap();
     } else {
-        panic!("B did not receive link proof: {result:?}");
+        panic!("B did not receive LINKREQUEST: {result:?}");
     }
 
-    println!("A links={}, B links={}", daemon_a.link_count(), daemon_b.link_count());
+    println!("A links={}, B links={}\n", daemon_a.link_count(), daemon_b.link_count());
 
-    // A receives LRPROOF response
+    // A receives LRPROOF response and processes it (ECDH key exchange)
     tokio::time::sleep(Duration::from_millis(200)).await;
     let result = daemon_a.media[0].recv().await;
-    println!("A response recv: {result:?}");
+    println!("A recv LRPROOF: {result:?}");
     if let Ok(Some((from, frame))) = result {
         let pkt = P::Packet::from_bytes(&frame).unwrap();
         println!("A: response pkt type={}, context={:#04x}, len={}", pkt.packet_type, pkt.context, pkt.data.len());
+        // The daemon's handle_frame dispatches PROOF+LRPROOF → handle_proof
         daemon_a.handle_frame(from, frame).await.unwrap();
     } else {
         panic!("A did not receive LRPROOF response: {result:?}");

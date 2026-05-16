@@ -27,9 +27,22 @@ use rsticulum_packet::{
 };
 use rsticulum_transport::{Link, Resource, ResourceConfig};
 use rsticulum_transport::Proof;
+use rsticulum_crypto::hkdf_sha256;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::api::ApiCommand;
+
+/// Data stored about a pending link initiation (initiator side).
+/// Ephemeral keys must survive until the LRPROOF response arrives.
+struct PendingLinkData {
+    /// Link identifier derived from the LINKREQUEST packet hash.
+    link_id: [u8; 16],
+    /// Our ephemeral X25519 private key (for ECDH key exchange).
+    ephemeral_priv: x25519_dalek::StaticSecret,
+    /// Our Ed25519 signing public key that we generated for this link.
+    #[allow(dead_code)]
+    initiator_sig_pub: [u8; 32],
+}
 
 /// The daemon — holds all runtime state.
 pub struct Daemon {
@@ -45,6 +58,8 @@ pub struct Daemon {
     channels: HashMap<rsticulum_identity::RnsAddress, Channel>,
     /// Pending links (handshake in progress), stored as Channels wrapping unestablished Links.
     pending_channels: HashMap<rsticulum_identity::RnsAddress, Channel>,
+    /// Pending link establishments (ephemeral keys stored until LRPROOF arrives).
+    pending_links: HashMap<rsticulum_identity::RnsAddress, PendingLinkData>,
     /// Known peer identity keys (from announces), for proof verification.
     peer_keys: HashMap<rsticulum_identity::RnsAddress, [u8; 32]>,
     /// Incoming resource transfers (hash → Resource)
@@ -67,6 +82,7 @@ impl Daemon {
             media: Vec::new(),
             channels: HashMap::new(),
             pending_channels: HashMap::new(),
+            pending_links: HashMap::new(),
             peer_keys: HashMap::new(),
             incoming_resources: HashMap::new(),
             announce_seq: 0,
@@ -500,30 +516,112 @@ impl Daemon {
             self.send_to(actual_from, &response_packet.to_bytes()).await?;
             tracing::info!("Link established with {actual_from} (responder)");
         } else if packet.context == rsticulum_packet::LRPROOF {
-            // Completing a handshake we initiated — received response from responder.
-            // The responder's proof is signed over THEIR transport_id (from packet header),
-            // NOT our transport_id. We must use the packet's transport_id for verification.
-            if let Some(mut channel) = self.pending_channels.remove(&actual_from) {
-                let responder_tid = packet.transport_id.ok_or(DaemonError::Other(
-                    "response proof missing transport_id".into(),
-                ))?;
-                let proof = rsticulum_transport::Proof::from_bytes(&packet.data)
-                    .map_err(|e| DaemonError::Other(format!("invalid proof: {e}")))?;
-                rsticulum_transport::verify_proof_with_public_key(
-                    &remote_key,
-                    &responder_tid,
-                    &proof,
-                )
-                .map_err(|_| DaemonError::Other("initiator proof verification failed".into()))?;
+            // Completing a handshake we initiated — received LRPROOF response from responder.
+            // The proof_data format is: signature(64) + responder_eph_pub(32) + signalling(6)
+            //
+            // signed_data = link_id + responder_eph_pub + responder_identity_key + signalling
+            //
+            // We verify the signature, derive the shared secret via ECDH, derive the
+            // encryption key via HKDF, and set the link to Established.
 
-                // Transition directly to Established — proof already verified above.
-                // Can't call establish() because state is Handshaking; can't call
-                // complete_handshake() because the proof was signed over the
-                // responder's transport_id, not ours.
-                channel.link_mut().set_state(rsticulum_transport::LinkState::Established);
-                self.channels.insert(actual_from, channel);
-                tracing::info!("Link established with {actual_from} (initiator)");
+            // Look up our pending channel and pending link data
+            let mut channel = match self.pending_channels.remove(&actual_from) {
+                Some(c) => c,
+                None => {
+                    tracing::debug!(
+                        "LRPROOF from {actual_from} but no pending channel — ignoring"
+                    );
+                    return Ok(());
+                }
+            };
+
+            let pending = match self.pending_links.remove(&actual_from) {
+                Some(p) => p,
+                None => {
+                    tracing::debug!(
+                        "LRPROOF from {actual_from} but no pending_links data — ignoring"
+                    );
+                    // Re-insert the pending channel for idempotency
+                    self.pending_channels.insert(actual_from, channel);
+                    return Ok(());
+                }
+            };
+
+            // Minimum proof data: signature(64) + eph_pub(32) = 96 bytes
+            if packet.data.len() < 96 {
+                tracing::warn!(
+                    "LRPROOF from {actual_from} too short: {} bytes",
+                    packet.data.len()
+                );
+                return Ok(());
             }
+
+            // Parse LRPROOF data
+            let mut sig_bytes = [0u8; 64];
+            sig_bytes.copy_from_slice(&packet.data[..64]);
+
+            let mut responder_eph_pub_bytes = [0u8; 32];
+            responder_eph_pub_bytes.copy_from_slice(&packet.data[64..96]);
+
+            // Signalling bytes (6 bytes)
+            let signalling = if packet.data.len() >= 102 {
+                let mut sig = [0u8; 6];
+                sig.copy_from_slice(&packet.data[96..102]);
+                sig
+            } else {
+                [0u8; 6]
+            };
+
+            // Derive shared key via ECDH: our_eph_priv * responder_eph_pub
+            let responder_eph_point =
+                x25519_dalek::PublicKey::from(responder_eph_pub_bytes);
+            let shared_secret = pending.ephemeral_priv.diffie_hellman(&responder_eph_point);
+            let shared_secret_bytes = shared_secret.to_bytes();
+
+            // Verify responder's Ed25519 signature over:
+            // signed_data = link_id + responder_eph_pub + responder_identity_key + signalling
+            let mut signed_data = Vec::with_capacity(16 + 32 + 32 + 6);
+            signed_data.extend_from_slice(&pending.link_id);
+            signed_data.extend_from_slice(&responder_eph_pub_bytes);
+            signed_data.extend_from_slice(&remote_key);
+            signed_data.extend_from_slice(&signalling);
+
+            let responder_identity_vk = match ed25519_dalek::VerifyingKey::from_bytes(&remote_key) {
+                Ok(vk) => vk,
+                Err(e) => {
+                    tracing::warn!("LRPROOF from {actual_from}: invalid responder Ed25519 key: {e}");
+                    return Ok(());
+                }
+            };
+            let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+
+            if let Err(e) = responder_identity_vk.verify(&signed_data, &signature) {
+                tracing::warn!(
+                    "LRPROOF from {actual_from}: signature verification failed: {e}"
+                );
+                return Ok(());
+            }
+
+            // HKDF-SHA256 derive encryption key
+            let encryption_key_bytes = hkdf_sha256(
+                32,
+                &shared_secret_bytes,
+                Some(&pending.link_id),
+                Some(b"rsticulum-link"),
+            );
+            let mut encryption_key = [0u8; 32];
+            encryption_key.copy_from_slice(&encryption_key_bytes);
+
+            // Set link properties and transition to Established
+            channel.link_mut().set_remote_encryption_key(encryption_key);
+            channel.link_mut().set_remote_signing_key(remote_key);
+            channel.link_mut().set_state(rsticulum_transport::LinkState::Established);
+            self.channels.insert(actual_from, channel);
+
+            tracing::info!(
+                "Link established with {actual_from} (initiator), link_id={:02x?}",
+                pending.link_id
+            );
         }
 
         Ok(())
@@ -796,20 +894,71 @@ impl Daemon {
     }
 
     /// Initiate a link to a remote peer.
+    ///
+    /// Sends a LINKREQUEST with ephemeral X25519 + Ed25519 keys,
+    /// stores pending state for the LRPROOF response.
     pub async fn connect(&mut self, remote: rsticulum_identity::RnsAddress) -> Result<(), DaemonError> {
         if self.channels.contains_key(&remote) || self.pending_channels.contains_key(&remote) {
             return Ok(());
         }
 
+        // 1. Generate ephemeral X25519 keypair
+        let eph_priv = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let eph_pub = x25519_dalek::PublicKey::from(&eph_priv);
+
+        // 2. Build signing keypair for this link
+        let sig_priv = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sig_pub = sig_priv.verifying_key();
+
+        // 3. Build request_data: pub_bytes(32) + sig_pub_bytes(32) + signalling(6)
+        let mut request_data = eph_pub.to_bytes().to_vec();
+        request_data.extend_from_slice(&sig_pub.to_bytes());
+        request_data.extend_from_slice(&[0u8; 6]); // signalling: all 0 for now
+
+        // 4. Send as LINKREQUEST (HEADER_1, broadcast/unicast)
+        let packet = rsticulum_packet::Packet {
+            header_type: rsticulum_packet::HEADER_1,
+            context_flag: rsticulum_packet::FLAG_UNSET,
+            transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+            destination_type: rsticulum_packet::DEST_SINGLE,
+            packet_type: rsticulum_packet::LINKREQUEST,
+            hops: rsticulum_packet::MAX_HOPS,
+            destination_hash: *remote.as_bytes(),
+            transport_id: None,
+            context: rsticulum_packet::NONE,
+            data: request_data,
+        };
+
+        // 5. Compute link_id from request hash
+        let link_id = compute_link_id_from_request(&packet);
+
+        // 6. Create pending channel with initiator=true
         let local_dest = Destination::singleton(self.keys.clone(), "daemon", vec![]);
-        let mut channel = Channel::new(Link::new(local_dest, remote));
-        let proof_pkt = channel.link_mut().establish()?;
+        let mut link = Link::new(local_dest, remote);
+        link.set_link_id(link_id);
+        link.set_initiator(true);
+        link.set_state(rsticulum_transport::LinkState::Handshaking);
+
+        let channel = Channel::new(link);
         self.pending_channels.insert(remote, channel);
-        let data = proof_pkt.to_bytes();
-        eprintln!("[CONNECT] Sending proof to {remote}, {} bytes via {} mediums", data.len(), self.media.len());
+
+        // 7. Store ephemeral private key and signing public key for LRPROOF handling
+        let pending = PendingLinkData {
+            link_id,
+            ephemeral_priv: eph_priv,
+            initiator_sig_pub: sig_pub.to_bytes(),
+        };
+        self.pending_links.insert(remote, pending);
+
+        let data = packet.to_bytes();
+        eprintln!(
+            "[CONNECT] Sending LINKREQUEST to {remote}, {} bytes via {} mediums",
+            data.len(),
+            self.media.len()
+        );
         let result = self.send_to(remote, &data).await;
         eprintln!("[CONNECT] send_to result: {result:?}");
-        tracing::info!("Link initiation sent to {remote}");
+        tracing::info!("LINKREQUEST sent to {remote}, link_id={:02x?}", link_id);
         result
     }
 
