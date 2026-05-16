@@ -1,0 +1,19 @@
+# 3-node Python RNS mesh: alpha—beta—gamma
+nodes:
+  - name: alpha
+    type: python-rns
+    transport: yes
+    server_port: 5001
+    peers: [beta]
+
+  - name: beta
+    type: python-rns
+    transport: yes
+    server_port: 5002
+    peers: [alpha, gamma]
+
+  - name: gamma
+    type: python-rns
+    transport: yes
+    server_port: 5003
+    peers: [beta]

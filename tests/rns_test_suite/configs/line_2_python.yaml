@@ -1,0 +1,13 @@
+# 2-node Python RNS direct connection
+nodes:
+  - name: alice
+    type: python-rns
+    transport: yes
+    server_port: 5101
+    peers: [bob]
+
+  - name: bob
+    type: python-rns
+    transport: yes
+    server_port: 5102
+    peers: [alice]

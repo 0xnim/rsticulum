@@ -30,6 +30,10 @@ pub struct Config {
     /// ICN forwarder configuration.
     #[serde(default)]
     pub icn: IcnConfig,
+
+    /// Local API socket configuration.
+    #[serde(default)]
+    pub api: Option<ApiConfig>,
 }
 
 impl Default for Config {
@@ -38,6 +42,7 @@ impl Default for Config {
             identity: IdentityConfig::default(),
             interfaces: vec![InterfaceConfig::default()],
             icn: IcnConfig::default(),
+            api: None,
         }
     }
 }
@@ -117,6 +122,18 @@ fn default_bind() -> String {
 
 fn default_cs_max() -> usize {
     10000
+}
+
+/// Local API socket configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiConfig {
+    /// Bind address for the API server (default: 127.0.0.1:37428).
+    #[serde(default = "default_api_bind")]
+    pub bind: String,
+}
+
+fn default_api_bind() -> String {
+    "127.0.0.1:37428".to_string()
 }
 
 impl Config {

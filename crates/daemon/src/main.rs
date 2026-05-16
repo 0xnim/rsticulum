@@ -103,6 +103,28 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Set up local API socket if configured
+    if let Some(api_cfg) = &config.api {
+        let bind_addr: std::net::SocketAddr = match api_cfg.bind.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Invalid API bind address '{}': {}", api_cfg.bind, e);
+                std::process::exit(1);
+            }
+        };
+
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        daemon.set_api_channel(cmd_rx);
+
+        tokio::spawn(async move {
+            if let Err(e) = rsticulum_daemon::api::run_api_server(bind_addr, cmd_tx).await {
+                tracing::error!("API server error: {e}");
+            }
+        });
+
+        tracing::info!("Local API socket listening on {bind_addr}");
+    }
+
     // Run daemon
     tracing::info!("Daemon running. Press Ctrl+C to stop.");
     if let Err(e) = daemon.run().await {

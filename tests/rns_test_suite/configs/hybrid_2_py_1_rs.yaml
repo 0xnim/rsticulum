@@ -1,0 +1,21 @@
+# Hybrid topology: 2 Python RNS + 1 Rust rsticulum
+#   py-alpha — py-beta — rs-gamma
+# Python nodes use TCP interfaces; Rust node uses UDP.
+nodes:
+  - name: py-alpha
+    type: python-rns
+    transport: yes
+    server_port: 5001
+    peers: [py-beta]
+
+  - name: py-beta
+    type: python-rns
+    transport: yes
+    server_port: 5002
+    peers: [py-alpha, rs-gamma]
+
+  - name: rs-gamma
+    type: rust-rsticulum
+    transport: yes
+    listen_port: 6001
+    peers: [py-beta]

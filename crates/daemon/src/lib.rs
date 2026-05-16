@@ -9,6 +9,7 @@
 //! - Local API (TCP socket for applications)
 
 pub mod config;
+pub mod api;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +21,10 @@ use rsticulum_packet::{
     Packet, ANNOUNCE, DATA, HEADER_2, LINKPROOF, PROOF,
 };
 use rsticulum_transport::Link;
+use rsticulum_transport::Proof;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::api::ApiCommand;
 
 /// The daemon — holds all runtime state.
 pub struct Daemon {
@@ -39,6 +44,8 @@ pub struct Daemon {
     peer_keys: HashMap<rsticulum_identity::RnsAddress, [u8; 32]>,
     /// Announce sequence counter.
     announce_seq: u64,
+    /// Receiver for API commands from the local TCP socket.
+    api_cmd_rx: Option<UnboundedReceiver<ApiCommand>>,
 }
 
 impl Daemon {
@@ -55,12 +62,18 @@ impl Daemon {
             pending_links: HashMap::new(),
             peer_keys: HashMap::new(),
             announce_seq: 0,
+            api_cmd_rx: None,
         }
     }
 
     /// Add a transport medium to the daemon.
     pub fn add_medium(&mut self, medium: Arc<dyn Medium>) {
         self.media.push(medium);
+    }
+
+    /// Set the channel for receiving API commands from the local TCP socket.
+    pub fn set_api_channel(&mut self, rx: UnboundedReceiver<ApiCommand>) {
+        self.api_cmd_rx = Some(rx);
     }
 
     /// Register a known peer's identity key (from an announce or out-of-band).
@@ -111,6 +124,65 @@ impl Daemon {
                     let addr = self.keys.rns_address();
                     if let Err(e) = medium.send(addr, &data).await {
                         tracing::debug!("Announce send failed via {}: {e}", medium.name());
+                    }
+                }
+            }
+
+            // Process API commands from the local TCP socket
+            // Collect commands first to avoid borrow conflicts with self methods
+            let api_commands: Vec<ApiCommand> = if let Some(rx) = &mut self.api_cmd_rx {
+                let mut cmds = Vec::new();
+                while let Ok(cmd) = rx.try_recv() {
+                    cmds.push(cmd);
+                }
+                cmds
+            } else {
+                Vec::new()
+            };
+            for cmd in api_commands {
+                match cmd {
+                    crate::api::ApiCommand::Express { dest, data, response } => {
+                        let addr = rsticulum_identity::RnsAddress::from_bytes(&dest)
+                            .expect("valid 16-byte address");
+                        let _ = response
+                            .send(self.send_to(addr, &data).await.map_err(|e| e.to_string()));
+                    }
+                    crate::api::ApiCommand::Publish { name, data, response } => {
+                        // Name is a hex-encoded 32-byte producer hash
+                        let producer_hash: [u8; 32] = match hex::decode(&name) {
+                            Ok(bytes) if bytes.len() == 32 => {
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&bytes);
+                                arr
+                            }
+                            _ => {
+                                let _ = response.send(Err(format!("Invalid name: must be 64 hex chars (32 bytes producer hash)")));
+                                continue;
+                            }
+                        };
+                        let icn_name = rsticulum_icn::Name::new(producer_hash, &[]);
+                        let dummy_proof = Proof {
+                            packet_hash: [0u8; 32],
+                            signature: [0u8; 64],
+                        };
+                        let icn_data = rsticulum_icn::Data::new(icn_name, data, dummy_proof);
+                        let _ = self.publish(icn_data);
+                        let _ = response.send(Ok(()));
+                    }
+                    crate::api::ApiCommand::Status { response } => {
+                        let status = crate::api::DaemonStatus {
+                            address: self.keys.rns_address().to_string(),
+                            link_count: self.links.len(),
+                            peer_count: self.peer_keys.len(),
+                            medium_count: self.media.len(),
+                        };
+                        let _ = response.send(status);
+                    }
+                    crate::api::ApiCommand::Connect { dest, response } => {
+                        let addr = rsticulum_identity::RnsAddress::from_bytes(&dest)
+                            .expect("valid 16-byte address");
+                        let _ = response
+                            .send(self.connect(addr).await.map_err(|e| e.to_string()));
                     }
                 }
             }

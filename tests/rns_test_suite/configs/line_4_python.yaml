@@ -1,0 +1,25 @@
+# 4-node line: A—B—C—D
+nodes:
+  - name: n1
+    type: python-rns
+    transport: yes
+    server_port: 5001
+    peers: [n2]
+
+  - name: n2
+    type: python-rns
+    transport: yes
+    server_port: 5002
+    peers: [n1, n3]
+
+  - name: n3
+    type: python-rns
+    transport: yes
+    server_port: 5003
+    peers: [n2, n4]
+
+  - name: n4
+    type: python-rns
+    transport: yes
+    server_port: 5004
+    peers: [n3]
