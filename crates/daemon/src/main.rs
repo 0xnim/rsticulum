@@ -16,8 +16,10 @@ use rsticulum_mesh::UdpMedium;
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+    // Initialize tracing (DEBUG level for link handshake debugging)
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
+        .init();
 
     // Load config
     let config_path = std::env::args()

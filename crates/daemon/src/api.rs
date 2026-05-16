@@ -34,6 +34,29 @@ pub enum ApiCommand {
         dest: [u8; 16],
         response: oneshot::Sender<Result<(), String>>,
     },
+    /// Send data over an established link.
+    SendOverLink {
+        dest: [u8; 16],
+        data: Vec<u8>,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Send a large resource over an established link.
+    SendResource {
+        dest: [u8; 16],
+        data: Vec<u8>,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Seed a peer's identity key and UDP endpoint.
+    /// Used by tests to bootstrap peer discovery.
+    SeedPeer {
+        /// 32-hex-char RNS address
+        dest: [u8; 16],
+        /// 64-hex-char Ed25519 signing key (32 bytes)
+        key_hex: String,
+        /// UDP endpoint (ip:port) for direct communication
+        udp_endpoint: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Status information returned by the daemon.
@@ -126,6 +149,9 @@ async fn handle_connection(
             "publish" => handle_publish(&request, &cmd_tx).await,
             "status" => handle_status(&cmd_tx).await,
             "connect" => handle_connect(&request, &cmd_tx).await,
+            "send" => handle_send_over_link(&request, &cmd_tx).await,
+            "send_resource" => handle_send_resource(&request, &cmd_tx).await,
+            "seed_peer" => handle_seed_peer(&request, &cmd_tx).await,
             other => {
                 serde_json::json!({"ok": false, "error": format!("Unknown command: {other}")})
             }
@@ -287,6 +313,164 @@ async fn handle_connect(
 
     match rx.await {
         Ok(Ok(())) => serde_json::json!({"ok": true, "result": "connecting"}),
+        Ok(Err(e)) => serde_json::json!({"ok": false, "error": e}),
+        Err(_) => serde_json::json!({"ok": false, "error": "Daemon response lost"}),
+    }
+}
+
+async fn handle_send_over_link(
+    request: &serde_json::Value,
+    cmd_tx: &UnboundedSender<ApiCommand>,
+) -> serde_json::Value {
+    let dest_hex = match request.get("dest").and_then(|d| d.as_str()) {
+        Some(h) => h,
+        None => return serde_json::json!({"ok": false, "error": "Missing 'dest' field"}),
+    };
+
+    let data_hex = match request.get("data").and_then(|d| d.as_str()) {
+        Some(h) => h,
+        None => return serde_json::json!({"ok": false, "error": "Missing 'data' field"}),
+    };
+
+    let dest_bytes = match hex::decode(dest_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({"ok": false, "error": format!("Invalid dest hex: {e}")});
+        }
+    };
+
+    let dest: [u8; 16] = match dest_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return serde_json::json!({"ok": false, "error": "dest must be 16 bytes (32 hex chars)"});
+        }
+    };
+
+    let data = match hex::decode(data_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({"ok": false, "error": format!("Invalid data hex: {e}")});
+        }
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if cmd_tx
+        .send(ApiCommand::SendOverLink {
+            dest,
+            data,
+            response: tx,
+        })
+        .is_err()
+    {
+        return serde_json::json!({"ok": false, "error": "Daemon not available"});
+    }
+
+    match rx.await {
+        Ok(Ok(())) => serde_json::json!({"ok": true, "result": "sent"}),
+        Ok(Err(e)) => serde_json::json!({"ok": false, "error": e}),
+        Err(_) => serde_json::json!({"ok": false, "error": "Daemon response lost"}),
+    }
+}
+
+async fn handle_send_resource(
+    request: &serde_json::Value,
+    cmd_tx: &UnboundedSender<ApiCommand>,
+) -> serde_json::Value {
+    let dest_hex = match request.get("dest").and_then(|d| d.as_str()) {
+        Some(h) => h,
+        None => return serde_json::json!({"ok": false, "error": "Missing 'dest' field"}),
+    };
+
+    let data_hex = match request.get("data").and_then(|d| d.as_str()) {
+        Some(h) => h,
+        None => return serde_json::json!({"ok": false, "error": "Missing 'data' field"}),
+    };
+
+    let dest_bytes = match hex::decode(dest_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({"ok": false, "error": format!("Invalid dest hex: {e}")});
+        }
+    };
+
+    let dest: [u8; 16] = match dest_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return serde_json::json!({"ok": false, "error": "dest must be 16 bytes (32 hex chars)"});
+        }
+    };
+
+    let data = match hex::decode(data_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({"ok": false, "error": format!("Invalid data hex: {e}")});
+        }
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if cmd_tx
+        .send(ApiCommand::SendResource {
+            dest,
+            data,
+            response: tx,
+        })
+        .is_err()
+    {
+        return serde_json::json!({"ok": false, "error": "Daemon not available"});
+    }
+
+    match rx.await {
+        Ok(Ok(())) => serde_json::json!({"ok": true, "result": "sent"}),
+        Ok(Err(e)) => serde_json::json!({"ok": false, "error": e}),
+        Err(_) => serde_json::json!({"ok": false, "error": "Daemon response lost"}),
+    }
+}
+
+async fn handle_seed_peer(
+    request: &serde_json::Value,
+    cmd_tx: &UnboundedSender<ApiCommand>,
+) -> serde_json::Value {
+    let dest_hex = match request.get("dest").and_then(|d| d.as_str()) {
+        Some(h) => h,
+        None => return serde_json::json!({"ok": false, "error": "Missing 'dest' field"}),
+    };
+    let key_hex = match request.get("key").and_then(|d| d.as_str()) {
+        Some(h) => h.to_string(),
+        None => return serde_json::json!({"ok": false, "error": "Missing 'key' field"}),
+    };
+    let endpoint = match request.get("endpoint").and_then(|d| d.as_str()) {
+        Some(h) => h.to_string(),
+        None => return serde_json::json!({"ok": false, "error": "Missing 'endpoint' field"}),
+    };
+
+    let dest_bytes = match hex::decode(dest_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({"ok": false, "error": format!("Invalid dest hex: {e}")});
+        }
+    };
+    let dest: [u8; 16] = match dest_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => {
+            return serde_json::json!({"ok": false, "error": "dest must be 16 bytes (32 hex chars)"});
+        }
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if cmd_tx
+        .send(ApiCommand::SeedPeer {
+            dest,
+            key_hex,
+            udp_endpoint: endpoint,
+            response: tx,
+        })
+        .is_err()
+    {
+        return serde_json::json!({"ok": false, "error": "Daemon not available"});
+    }
+
+    match rx.await {
+        Ok(Ok(())) => serde_json::json!({"ok": true, "result": "peer_seeded"}),
         Ok(Err(e)) => serde_json::json!({"ok": false, "error": e}),
         Err(_) => serde_json::json!({"ok": false, "error": "Daemon response lost"}),
     }

@@ -48,8 +48,18 @@ impl Keys {
     }
 
     /// 16-byte RNS-compatible address (wire protocol).
+    /// Matches Python RNS: SHA-256(X25519_pub || Ed25519_pub)[:16]
     pub fn rns_address(&self) -> RnsAddress {
-        RnsAddress::from_identity_key(&self.identity_key_bytes())
+        RnsAddress::from_full_key(&self.full_public_key_bytes())
+    }
+
+    /// Full 64-byte public key: X25519(32) || Ed25519(32).
+    /// Matches Python RNS `Identity.get_public_key()`.
+    pub fn full_public_key_bytes(&self) -> [u8; crate::FULL_PUBLIC_KEY_LEN] {
+        let mut full = [0u8; crate::FULL_PUBLIC_KEY_LEN];
+        full[..crate::ENCRYPTION_KEY_LEN].copy_from_slice(&self.encryption_key());
+        full[crate::ENCRYPTION_KEY_LEN..].copy_from_slice(&self.identity_key_bytes());
+        full
     }
 
     pub(crate) fn signing_key(&self) -> &SigningKey {

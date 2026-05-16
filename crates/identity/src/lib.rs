@@ -36,4 +36,6 @@ pub const ADDRESS_LEN: usize = 32;
 pub const RNS_ADDRESS_LEN: usize = 16;
 pub const IDENTITY_KEY_LEN: usize = 32;
 pub const ENCRYPTION_KEY_LEN: usize = 32;
+/// Full public key (X25519 || Ed25519) — 64 bytes, matches Python RNS.
+pub const FULL_PUBLIC_KEY_LEN: usize = 64;
 pub const SIGNATURE_LEN: usize = 64;

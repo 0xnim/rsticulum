@@ -23,6 +23,17 @@ impl RnsAddress {
         Self(bytes)
     }
 
+    /// Derive an RNS address from the full 64-byte public key (X25519 || Ed25519).
+    /// Matches Python RNS: SHA-256(full_key)[:16]
+    pub fn from_full_key(key: &[u8; crate::FULL_PUBLIC_KEY_LEN]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(key);
+        let result = hasher.finalize();
+        let mut bytes = [0u8; RNS_ADDRESS_LEN];
+        bytes.copy_from_slice(&result[..RNS_ADDRESS_LEN]);
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; RNS_ADDRESS_LEN] {
         &self.0
     }

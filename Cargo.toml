@@ -59,9 +59,19 @@ rsticulum-interface.workspace = true
 
 [dev-dependencies]
 rsticulum-crypto = { path = "crates/crypto" }
+rsticulum-identity = { path = "crates/identity" }
+rsticulum-packet = { path = "crates/packet" }
+rsticulum-destination = { path = "crates/destination" }
+rsticulum-mesh = { path = "crates/mesh" }
+rsticulum-transport = { path = "crates/transport" }
+rsticulum-daemon = { path = "crates/daemon" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+tempfile = "3"
 x25519-dalek = "2"
+ed25519-dalek = "2"
 getrandom = "0.2"
+tracing-subscriber = "0.3"
+tracing = "0.1"

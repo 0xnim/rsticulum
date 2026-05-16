@@ -118,6 +118,11 @@ pub struct Link {
     state: LinkState,
     /// Unique transport ID for this link (16 bytes).
     transport_id: [u8; 16],
+    /// Link identifier derived from the LINKREQUEST packet hash (16 bytes).
+    /// Used for ECDH key derivation in the RNS 3-way handshake.
+    link_id: [u8; 16],
+    /// Whether this side initiated the link (true = we sent LINKREQUEST).
+    initiator: bool,
     /// Inbound message buffer (for recv).
     inbound: Vec<Vec<u8>>,
     /// Outbound message buffer (for send).
@@ -139,6 +144,8 @@ impl Link {
             config: LinkConfig::default(),
             state: LinkState::Closed,
             transport_id,
+            link_id: [0u8; 16],
+            initiator: false,
             inbound: Vec::new(),
             outbound: Vec::new(),
         }
@@ -155,6 +162,8 @@ impl Link {
             config,
             state: LinkState::Closed,
             transport_id,
+            link_id: [0u8; 16],
+            initiator: false,
             inbound: Vec::new(),
             outbound: Vec::new(),
         }
@@ -187,6 +196,26 @@ impl Link {
         &self.config
     }
 
+    /// The link identifier (derived from LINKREQUEST packet hash).
+    pub fn link_id(&self) -> &[u8; 16] {
+        &self.link_id
+    }
+
+    /// Whether this side initiated the link.
+    pub fn is_initiator(&self) -> bool {
+        self.initiator
+    }
+
+    /// Set the link identifier.
+    pub fn set_link_id(&mut self, id: [u8; 16]) {
+        self.link_id = id;
+    }
+
+    /// Set whether this side is the initiator.
+    pub fn set_initiator(&mut self, initiator: bool) {
+        self.initiator = initiator;
+    }
+
     /// Returns `true` if the link is established.
     pub fn is_established(&self) -> bool {
         self.state == LinkState::Established
@@ -211,6 +240,13 @@ impl Link {
     /// Returns `true` if encryption is active on this link.
     pub fn is_encrypted(&self) -> bool {
         self.remote_encryption_key.is_some()
+    }
+
+    /// Set the link state directly (for daemon orchestration).
+    /// Used when transitioning from Handshaking to Established
+    /// after proof verification is handled externally.
+    pub fn set_state(&mut self, state: LinkState) {
+        self.state = state;
     }
 
     // ── Lifecycle ──
