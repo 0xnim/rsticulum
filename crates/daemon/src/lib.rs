@@ -27,7 +27,6 @@ use rsticulum_packet::{
 };
 use rsticulum_transport::{Link, Resource, ResourceConfig};
 use rsticulum_transport::Proof;
-use rsticulum_crypto::hkdf_sha256;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::api::ApiCommand;
@@ -602,18 +601,12 @@ impl Daemon {
                 return Ok(());
             }
 
-            // HKDF-SHA256 derive encryption key
-            let encryption_key_bytes = hkdf_sha256(
-                32,
-                &shared_secret_bytes,
-                Some(&pending.link_id),
-                Some(b"rsticulum-link"),
-            );
-            let mut encryption_key = [0u8; 32];
-            encryption_key.copy_from_slice(&encryption_key_bytes);
+            // Store raw ECDH shared secret for AES-CBC+HMAC Link encryption
+            let mut shared_key = [0u8; 32];
+            shared_key.copy_from_slice(&shared_secret_bytes);
 
             // Set link properties and transition to Established
-            channel.link_mut().set_remote_encryption_key(encryption_key);
+            channel.link_mut().set_shared_key(shared_key);
             channel.link_mut().set_remote_signing_key(remote_key);
             channel.link_mut().set_state(rsticulum_transport::LinkState::Established);
             self.channels.insert(actual_from, channel);
@@ -693,15 +686,9 @@ impl Daemon {
         let shared_secret = our_eph_secret.diffie_hellman(&initiator_eph_point);
         let shared_secret_bytes = shared_secret.to_bytes();
 
-        // Step 6: HKDF-SHA256 derive encryption key
-        let encryption_key_bytes = rsticulum_crypto::hkdf_sha256(
-            32,
-            &shared_secret_bytes,
-            Some(&link_id),
-            Some(b"rsticulum-link"),
-        );
-        let mut encryption_key = [0u8; 32];
-        encryption_key.copy_from_slice(&encryption_key_bytes);
+        // Store raw ECDH shared secret for AES-CBC+HMAC Link encryption
+        let mut shared_key = [0u8; 32];
+        shared_key.copy_from_slice(&shared_secret_bytes);
 
         // Step 7: Build LRPROOF response
         // signed_data = link_id + our_eph_pub + our_identity_key + signalling
@@ -726,7 +713,7 @@ impl Daemon {
         link.set_link_id(link_id);
         link.set_initiator(false);
         link.set_remote_signing_key(remote_signing_key);
-        link.set_remote_encryption_key(initiator_eph_pub);
+        link.set_shared_key(shared_key);
         link.set_state(rsticulum_transport::LinkState::Established);
 
         let channel = Channel::new(link);

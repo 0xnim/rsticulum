@@ -13,10 +13,17 @@
 
 use crate::error::TransportError;
 use crate::proof::{generate_proof, verify_proof, verify_proof_with_public_key, Proof};
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use hmac::{Hmac, Mac};
+use rsticulum_crypto::hkdf_sha256;
 use rsticulum_destination::Destination;
 use rsticulum_identity::{Keys, RnsAddress};
 use rsticulum_packet::{Packet, DATA, DEST_LINK, HEADER_2, TRANSPORT_UNICAST};
+use sha2::Sha256;
 use std::sync::Arc;
+
+type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 // ── Link configuration ──
 
@@ -112,6 +119,10 @@ pub struct Link {
     /// The remote's Ed25519 signing (identity) public key.
     /// Must be set before `complete_handshake()` for real interop.
     remote_signing_key: Option<[u8; 32]>,
+    /// ECDH-derived shared key from LINKREQUEST handshake (raw shared secret).
+    /// When set, `send()` uses AES-CBC+HMAC encryption and `deliver()` uses AES-CBC+HMAC
+    /// decryption matching Python RNS Link encryption.
+    shared_key: Option<[u8; 32]>,
     /// Link configuration.
     config: LinkConfig,
     /// Current link state.
@@ -141,6 +152,7 @@ impl Link {
             remote,
             remote_encryption_key: None,
             remote_signing_key: None,
+            shared_key: None,
             config: LinkConfig::default(),
             state: LinkState::Closed,
             transport_id,
@@ -159,6 +171,7 @@ impl Link {
             remote,
             remote_encryption_key: None,
             remote_signing_key: None,
+            shared_key: None,
             config,
             state: LinkState::Closed,
             transport_id,
@@ -239,7 +252,20 @@ impl Link {
 
     /// Returns `true` if encryption is active on this link.
     pub fn is_encrypted(&self) -> bool {
-        self.remote_encryption_key.is_some()
+        self.remote_encryption_key.is_some() || self.shared_key.is_some()
+    }
+
+    /// Set the ECDH-derived shared key from LINKREQUEST handshake.
+    ///
+    /// This is the raw ECDH shared secret. When set, `send()` uses AES-CBC+HMAC
+    /// encryption and `deliver()` uses AES-CBC+HMAC decryption matching Python RNS.
+    pub fn set_shared_key(&mut self, key: [u8; 32]) {
+        self.shared_key = Some(key);
+    }
+
+    /// Get the raw ECDH shared key, if set.
+    pub fn shared_key(&self) -> Option<&[u8; 32]> {
+        self.shared_key.as_ref()
     }
 
     /// Set the link state directly (for daemon orchestration).
@@ -380,14 +406,17 @@ impl Link {
     /// Queue data for sending over the link.
     ///
     /// Returns a HEADER_2 DATA packet ready for transmission.
-    /// If a remote encryption key is set, data is encrypted before
-    /// being placed in the packet.
+    /// If a shared key is set (from ECDH handshake), data is encrypted using
+    /// AES-CBC+HMAC matching Python RNS Link encryption.
+    /// Falls back to the old `encrypt_for` scheme if only `remote_encryption_key` is set.
     pub fn send(&mut self, data: Vec<u8>) -> Result<Packet, TransportError> {
         if self.state != LinkState::Established {
             return Err(TransportError::LinkNotEstablished);
         }
 
-        let payload = if let Some(ref remote_key) = self.remote_encryption_key {
+        let payload = if let (Some(ref key), Some(ref lid)) = (self.shared_key, Some(self.link_id)) {
+            encrypt_link_data(&data, key, lid)
+        } else if let Some(ref remote_key) = self.remote_encryption_key {
             self.local
                 .keys()
                 .encrypt_for(remote_key, self.remote.as_bytes(), &data)
@@ -420,8 +449,9 @@ impl Link {
     /// Receive data from a packet delivered to this link.
     ///
     /// If the packet's transport ID matches, its payload is buffered and
-    /// can be retrieved with [`Link::recv`]. If a remote encryption key
-    /// is set, data is decrypted before buffering.
+    /// can be retrieved with [`Link::recv`]. If a shared key is set, data is
+    /// decrypted using AES-CBC+HMAC matching Python RNS Link encryption.
+    /// Falls back to the old `decrypt_from` scheme if only `remote_encryption_key` is set.
     pub fn deliver(&mut self, packet: &Packet) -> Result<(), TransportError> {
         if self.state != LinkState::Established {
             return Err(TransportError::LinkNotEstablished);
@@ -431,7 +461,10 @@ impl Link {
             return Err(TransportError::Other("transport ID mismatch".into()));
         }
 
-        let data = if self.remote_encryption_key.is_some() {
+        let data = if let (Some(ref key), Some(ref lid)) = (self.shared_key, Some(self.link_id)) {
+            decrypt_link_data(&packet.data, key, lid)
+                .map_err(|e| TransportError::Other(format!("decryption: {e}")))?
+        } else if self.remote_encryption_key.is_some() {
             self.local
                 .keys()
                 .decrypt_from(&packet.data)
@@ -473,6 +506,77 @@ impl Link {
         }
         id
     }
+}
+
+// ── Link-level encryption ──
+
+/// Encrypt link data using the ECDH-derived shared key (Python RNS Link encryption).
+///
+/// Uses HKDF(shared_key, salt=link_id, context=b"ReticulumLinkKey") to derive
+/// a 16-byte AES-128-CBC key and 16-byte IV, then encrypts with PKCS7 padding,
+/// and prepends HMAC-SHA256 over the ciphertext.
+///
+/// Output format: `ciphertext || HMAC-SHA256(32 bytes)`
+fn encrypt_link_data(plaintext: &[u8], shared_key: &[u8; 32], link_id: &[u8; 16]) -> Vec<u8> {
+    // Derive encryption key and IV from shared_key
+    let derived = hkdf_sha256(32, shared_key, Some(link_id), Some(b"ReticulumLinkKey"));
+
+    let enc_key: [u8; 16] = derived[..16].try_into().unwrap();
+    let iv: [u8; 16] = derived[16..32].try_into().unwrap();
+
+    // Encrypt with AES-128-CBC + PKCS7
+    let mut buf = vec![0u8; plaintext.len() + 16 + 32]; // plaintext + max padding + HMAC
+    let cipher = Aes128CbcEnc::new(&enc_key.into(), &iv.into());
+    let encrypted_len = cipher
+        .encrypt_padded_b2b_mut::<Pkcs7>(plaintext, &mut buf)
+        .expect("encrypt buffer is large enough")
+        .len();
+    buf.truncate(encrypted_len);
+
+    // HMAC-SHA256 over ciphertext
+    let mut mac = Hmac::<Sha256>::new_from_slice(&enc_key).expect("HMAC key size is valid");
+    mac.update(&buf);
+    let hmac_result = mac.finalize().into_bytes();
+
+    // Output: ciphertext || HMAC
+    buf.extend_from_slice(&hmac_result);
+    buf
+}
+
+/// Decrypt link data using the ECDH-derived shared key (Python RNS Link encryption).
+///
+/// Verifies HMAC-SHA256, then decrypts with AES-128-CBC + PKCS7.
+fn decrypt_link_data(
+    ciphertext_with_hmac: &[u8],
+    shared_key: &[u8; 32],
+    link_id: &[u8; 16],
+) -> Result<Vec<u8>, String> {
+    if ciphertext_with_hmac.len() < 32 {
+        return Err("ciphertext too short".into());
+    }
+
+    let (ciphertext, hmac_received) =
+        ciphertext_with_hmac.split_at(ciphertext_with_hmac.len() - 32);
+
+    let derived = hkdf_sha256(32, shared_key, Some(link_id), Some(b"ReticulumLinkKey"));
+
+    let enc_key: [u8; 16] = derived[..16].try_into().unwrap();
+    let iv: [u8; 16] = derived[16..32].try_into().unwrap();
+
+    // Verify HMAC
+    let mut mac = Hmac::<Sha256>::new_from_slice(&enc_key).expect("HMAC key size is valid");
+    mac.update(ciphertext);
+    mac.verify_slice(hmac_received)
+        .map_err(|_| "HMAC verification failed".to_string())?;
+
+    // Decrypt with AES-128-CBC + PKCS7
+    let mut buf = vec![0u8; ciphertext.len()];
+    let decrypted = Aes128CbcDec::new(&enc_key.into(), &iv.into())
+        .decrypt_padded_b2b_mut::<Pkcs7>(ciphertext, &mut buf)
+        .map_err(|e| format!("decryption failed: {e}"))?;
+    let decrypted_len = decrypted.len();
+    buf.truncate(decrypted_len);
+    Ok(buf)
 }
 
 // ── Tests ──
@@ -678,5 +782,100 @@ mod tests {
             .complete_handshake(&proof_bytes.to_bytes())
             .unwrap_err();
         assert!(matches!(err, TransportError::SignatureVerification));
+    }
+
+    #[test]
+    fn link_encrypt_decrypt_roundtrip() {
+        let shared_key = [0xABu8; 32];
+        let link_id = [0xCDu8; 16];
+        let plaintext = b"hello secure link";
+
+        let encrypted = encrypt_link_data(plaintext, &shared_key, &link_id);
+        assert!(encrypted.len() > plaintext.len());
+
+        let decrypted = decrypt_link_data(&encrypted, &shared_key, &link_id)
+            .expect("decryption should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn link_encrypt_decrypt_empty() {
+        let shared_key = [0xABu8; 32];
+        let link_id = [0xCDu8; 16];
+        let plaintext = b"";
+
+        let encrypted = encrypt_link_data(plaintext, &shared_key, &link_id);
+        let decrypted = decrypt_link_data(&encrypted, &shared_key, &link_id)
+            .expect("decryption of empty should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn link_encrypt_tampered_hmac_fails() {
+        let shared_key = [0xABu8; 32];
+        let link_id = [0xCDu8; 16];
+        let plaintext = b"test data";
+
+        let mut encrypted = encrypt_link_data(plaintext, &shared_key, &link_id);
+        // Tamper the HMAC
+        let len = encrypted.len();
+        encrypted[len - 1] ^= 0xFF;
+
+        let result = decrypt_link_data(&encrypted, &shared_key, &link_id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("HMAC verification failed"));
+    }
+
+    #[test]
+    fn link_encrypt_different_keys_different_output() {
+        let key_a = [0xAAu8; 32];
+        let key_b = [0xBBu8; 32];
+        let link_id = [0xCCu8; 16];
+        let plaintext = b"hello";
+
+        let enc_a = encrypt_link_data(plaintext, &key_a, &link_id);
+        let enc_b = encrypt_link_data(plaintext, &key_b, &link_id);
+        assert_ne!(enc_a, enc_b);
+    }
+
+    #[test]
+    fn link_send_recv_with_shared_key() {
+        let mut link = make_established_link();
+        let shared_key = [0x42u8; 32];
+        link.set_shared_key(shared_key);
+        // link_id is already set by make_established_link
+
+        let pkt = link
+            .send(b"encrypted data".to_vec())
+            .expect("send should work");
+        // Data should be encrypted (not plaintext)
+        assert_ne!(pkt.data, b"encrypted data");
+        assert!(pkt.data.len() > b"encrypted data".len());
+
+        // Deliver to same link — should decrypt OK
+        link.deliver(&pkt).expect("deliver should succeed");
+        let msg = link.recv().expect("should have message");
+        assert_eq!(msg, b"encrypted data");
+    }
+
+    #[test]
+    fn link_is_encrypted_with_shared_key() {
+        let mut link = make_established_link();
+        assert!(!link.is_encrypted());
+        link.set_shared_key([0x42u8; 32]);
+        assert!(link.is_encrypted());
+    }
+
+    #[test]
+    fn link_encrypt_decrypt_deterministic() {
+        // Same key + same plaintext = same ciphertext (CBC IV derived from HKDF,
+        // and HKDF with same salt gives same output)
+        let shared_key = [0xABu8; 32];
+        let link_id = [0xCDu8; 16];
+        let plaintext = b"deterministic test";
+
+        let enc1 = encrypt_link_data(plaintext, &shared_key, &link_id);
+        let enc2 = encrypt_link_data(plaintext, &shared_key, &link_id);
+        assert_eq!(enc1, enc2);
     }
 }
