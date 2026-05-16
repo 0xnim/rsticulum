@@ -16,14 +16,17 @@ pub mod api;
 use sha2::{Digest, Sha256};
 use ed25519_dalek::Verifier;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rsticulum_channel::Channel;
 use rsticulum_destination::Destination;
 use rsticulum_identity::Keys;
 use rsticulum_mesh::{Medium, MeshRouter};
+use rsticulum_mesh::path_request::{PathRequest, PathReply, handle_path_request, handle_path_reply};
 use rsticulum_packet::{
     Packet, ANNOUNCE, DATA, HEADER_2, LINKPROOF, LINKREQUEST, PROOF,
+    PATH_REQUEST as PATH_REQ_CTX, PATH_RESPONSE,
 };
 use rsticulum_transport::{Link, Resource, ResourceConfig};
 use rsticulum_transport::Proof;
@@ -65,6 +68,10 @@ pub struct Daemon {
     incoming_resources: HashMap<Vec<u8>, Resource>,
     /// Announce sequence counter.
     announce_seq: u64,
+    /// Tracks announce hashes we've already forwarded (to prevent loops).
+    sent_announces: HashSet<[u8; 16]>,
+    /// Pending path requests we're waiting on (destination_hash → request_id).
+    pending_path_requests: HashMap<[u8; 16], [u8; 16]>,
     /// Receiver for API commands from the local TCP socket.
     api_cmd_rx: Option<UnboundedReceiver<ApiCommand>>,
 }
@@ -85,6 +92,8 @@ impl Daemon {
             peer_keys: HashMap::new(),
             incoming_resources: HashMap::new(),
             announce_seq: 0,
+            sent_announces: HashSet::new(),
+            pending_path_requests: HashMap::new(),
             api_cmd_rx: None,
         }
     }
@@ -268,6 +277,12 @@ impl Daemon {
             DATA if packet.header_type == HEADER_2 && packet.transport_id.is_some() => {
                 self.handle_link_data(from, &packet).await?;
             }
+            DATA if packet.context == PATH_REQ_CTX => {
+                self.handle_path_request_msg(from, &packet).await?;
+            }
+            DATA if packet.context == PATH_RESPONSE => {
+                self.handle_path_reply_msg(from, &packet).await?;
+            }
             _ => {
                 // Try ICN fallback — could be a direct ICN packet or Resource segment
                 return self.handle_icn_frame(from, frame).await;
@@ -389,6 +404,159 @@ impl Daemon {
 
             // Update mesh routing table (1-hop neighbor via this peer)
             self.router.update_route(from, from, 1.0, 1);
+        }
+
+        // ── Announce propagation ──
+        // Forward to other media with decremented hops (loop prevention via sent_announces)
+        if packet.hops > 0 {
+            let announce_hash = packet.destination_hash;
+            if !self.sent_announces.contains(&announce_hash) {
+                self.sent_announces.insert(announce_hash);
+                let mut fwd = packet.clone();
+                fwd.hops = fwd.hops.saturating_sub(1);
+                let fwd_bytes = fwd.to_bytes();
+                for medium in &self.media {
+                    let _ = medium.broadcast(&fwd_bytes).await;
+                }
+                tracing::debug!(
+                    "Propagated announce from {from} (hops={}) to {} media",
+                    fwd.hops,
+                    self.media.len(),
+                );
+            } else {
+                tracing::trace!("Skipping already-forwarded announce from {from}");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle an incoming path request (DATA packet with PATH_REQUEST context).
+    async fn handle_path_request_msg(
+        &mut self,
+        from: rsticulum_identity::RnsAddress,
+        packet: &Packet,
+    ) -> Result<(), DaemonError> {
+        tracing::debug!("Received PATH_REQUEST from {from}");
+
+        // Deserialize the PathRequest from the packet data
+        let req: PathRequest = match bincode::deserialize(&packet.data) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize PathRequest from {from}: {e}");
+                return Ok(());
+            }
+        };
+
+        let local_addr = self.keys.rns_address();
+
+        // Check if we can answer this path request
+        if let Some(reply) = handle_path_request(&req, &self.router, local_addr) {
+            // We know the destination — send a PathReply back to the requester
+            let reply_bytes = bincode::serialize(&reply)
+                .map_err(|e| DaemonError::Other(format!("serialize PathReply: {e}")))?;
+
+            // The reply should go to whoever sent us the request
+            let reply_packet = Packet {
+                header_type: rsticulum_packet::HEADER_1,
+                context_flag: rsticulum_packet::FLAG_UNSET,
+                transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+                destination_type: rsticulum_packet::DEST_SINGLE,
+                packet_type: DATA,
+                hops: rsticulum_packet::MAX_HOPS,
+                destination_hash: *from.as_bytes(),
+                transport_id: None,
+                context: PATH_RESPONSE,
+                data: reply_bytes,
+            };
+            self.send_to(from, &reply_packet.to_bytes()).await?;
+            tracing::debug!("Sent PATH_REPLY to {from} for destination");
+            return Ok(());
+        }
+
+        // We don't know the destination — forward the request if not expired
+        if req.is_expired() {
+            tracing::debug!("PATH_REQUEST to {} expired, dropping", hex::encode(req.destination_hash));
+            return Ok(());
+        }
+
+        // Add our hop and forward to all peers (flood)
+        let mut fwd_req = req;
+        fwd_req.add_hop(local_addr);
+        let fwd_bytes = bincode::serialize(&fwd_req)
+            .map_err(|e| DaemonError::Other(format!("serialize fwd PathRequest: {e}")))?;
+
+        let fwd_packet = Packet {
+            header_type: rsticulum_packet::HEADER_1,
+            context_flag: rsticulum_packet::FLAG_UNSET,
+            transport_type: rsticulum_packet::TRANSPORT_BROADCAST,
+            destination_type: rsticulum_packet::DEST_SINGLE,
+            packet_type: DATA,
+            hops: rsticulum_packet::MAX_HOPS,
+            destination_hash: fwd_req.destination_hash,
+            transport_id: None,
+            context: PATH_REQ_CTX,
+            data: fwd_bytes,
+        };
+        let fwd_bytes_raw = fwd_packet.to_bytes();
+        for medium in &self.media {
+            let _ = medium.broadcast(&fwd_bytes_raw).await;
+        }
+        tracing::debug!("Forwarded PATH_REQUEST to {} ({} hops)", hex::encode(fwd_req.destination_hash), fwd_req.path.len());
+
+        Ok(())
+    }
+
+    /// Handle an incoming path response (DATA packet with PATH_RESPONSE context).
+    async fn handle_path_reply_msg(
+        &mut self,
+        from: rsticulum_identity::RnsAddress,
+        packet: &Packet,
+    ) -> Result<(), DaemonError> {
+        tracing::debug!("Received PATH_REPLY from {from}");
+
+        // Deserialize the PathReply from the packet data
+        let reply: PathReply = match bincode::deserialize(&packet.data) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize PathReply from {from}: {e}");
+                return Ok(());
+            }
+        };
+
+        let local_addr = self.keys.rns_address();
+
+        // Process the reply — updates routing table, returns next hop to forward to
+        let next_hop = handle_path_reply(&reply, &mut self.router, local_addr);
+
+        if let Some(hop) = next_hop {
+            // We're not the final requester — forward the reply toward the origin
+            let reply_bytes = bincode::serialize(&reply)
+                .map_err(|e| DaemonError::Other(format!("serialize fwd PathReply: {e}")))?;
+
+            let fwd_packet = Packet {
+                header_type: rsticulum_packet::HEADER_1,
+                context_flag: rsticulum_packet::FLAG_UNSET,
+                transport_type: rsticulum_packet::TRANSPORT_UNICAST,
+                destination_type: rsticulum_packet::DEST_SINGLE,
+                packet_type: DATA,
+                hops: rsticulum_packet::MAX_HOPS,
+                destination_hash: *hop.as_bytes(),
+                transport_id: None,
+                context: PATH_RESPONSE,
+                data: reply_bytes,
+            };
+            self.send_to(hop, &fwd_packet.to_bytes()).await?;
+            tracing::debug!("Forwarded PATH_REPLY to {hop}");
+        } else {
+            // We ARE the requester — route has been discovered
+            tracing::info!(
+                "Path discovered to {} via {:02x?}",
+                hex::encode(reply.destination_hash),
+                reply.route,
+            );
+            // Remove from pending path requests
+            self.pending_path_requests.remove(&reply.request_id);
         }
 
         Ok(())
@@ -829,17 +997,69 @@ impl Daemon {
     }
 
     /// Send raw bytes to a mesh destination.
+    /// Attempts direct medium send first, then falls back to routing table,
+    /// then triggers path discovery if no route exists.
     async fn send_to(
-        &self,
+        &mut self,
         dest: rsticulum_identity::RnsAddress,
         data: &[u8],
     ) -> Result<(), DaemonError> {
+        // 1. Try direct medium send (peer is directly reachable on this medium)
         for medium in &self.media {
             match medium.send(dest, data).await {
                 Ok(()) => return Ok(()),
-                Err(e) => tracing::debug!("Failed to send via {}: {e}", medium.name()),
+                Err(e) => tracing::debug!("Failed to send directly via {}: {e}", medium.name()),
             }
         }
+
+        // 2. Check routing table for a next-hop route
+        if let Some(entry) = self.router.next_hop(&dest) {
+            let next_hop = entry.next_hop;
+            // Send via the next hop (try all media)
+            for medium in &self.media {
+                match medium.send(next_hop, data).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => tracing::debug!("Failed to route via {} through {next_hop}: {e}", medium.name()),
+                }
+            }
+            // Route exists but no medium can reach the next hop
+            tracing::debug!("Route to {dest} exists via {next_hop} but no medium can reach it");
+            return Err(DaemonError::NoRoute);
+        }
+
+        // 3. No route — trigger path discovery
+        let req = PathRequest::new(dest, rsticulum_mesh::MAX_HOPS);
+        let request_id = req.request_id;
+
+        // Don't send duplicate path requests for the same destination
+        if !self.pending_path_requests.contains_key(dest.as_bytes()) {
+            self.pending_path_requests.insert(*dest.as_bytes(), request_id);
+
+            let req_bytes = bincode::serialize(&req)
+                .map_err(|e| DaemonError::Other(format!("serialize PathRequest: {e}")))?;
+
+            let req_packet = Packet {
+                header_type: rsticulum_packet::HEADER_1,
+                context_flag: rsticulum_packet::FLAG_UNSET,
+                transport_type: rsticulum_packet::TRANSPORT_BROADCAST,
+                destination_type: rsticulum_packet::DEST_SINGLE,
+                packet_type: DATA,
+                hops: rsticulum_packet::MAX_HOPS,
+                destination_hash: *dest.as_bytes(),
+                transport_id: None,
+                context: PATH_REQ_CTX,
+                data: req_bytes,
+            };
+
+            let req_raw = req_packet.to_bytes();
+            for medium in &self.media {
+                let _ = medium.broadcast(&req_raw).await;
+            }
+            tracing::info!("Path discovery initiated for {dest}");
+        } else {
+            tracing::debug!("Path request already pending for {dest}");
+        }
+
         Err(DaemonError::NoRoute)
     }
 

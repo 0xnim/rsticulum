@@ -69,6 +69,9 @@ pub const LINKPROOF: u8 = 0xFD;
 pub const KEEPALIVE: u8 = 0xFA;
 pub const LRPROOF: u8 = 0xFF;
 
+/// Context constant for path requests (DATA packets used for path discovery).
+pub const PATH_REQUEST: u8 = 0x01;
+
 /// Destination type constants.
 pub const DEST_SINGLE: u8 = 0x00;
 pub const DEST_LINK: u8 = 0x01;
