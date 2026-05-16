@@ -92,18 +92,21 @@ impl Daemon {
 
         // Main event loop
         loop {
-            // Collect frames from all media
+            // Collect frames from all media (with timeout so API commands can be processed)
             let mut frames = Vec::new();
             for medium in &self.media {
-                match medium.recv().await {
-                    Ok(Some((from, frame))) => {
+                match tokio::time::timeout(std::time::Duration::from_millis(100), medium.recv()).await {
+                    Ok(Ok(Some((from, frame)))) => {
                         frames.push((from, frame));
                     }
-                    Ok(None) => {
+                    Ok(Ok(None)) => {
                         tracing::debug!("Medium {} closed", medium.name());
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::error!("Error receiving from {}: {e}", medium.name());
+                    }
+                    Err(_elapsed) => {
+                        // No data available within timeout — continue to process API commands
                     }
                 }
             }
