@@ -71,14 +71,8 @@ async fn test_rust_to_python_link() {
     // Give Python time to initialize
     sleep(Duration::from_secs(1)).await;
 
-    // Build and start rsticulum daemon
-    let build = Command::new("cargo")
-        .args(["build", "--package", "rsticulum-daemon", "--bin", "rsticulumd", "-q"])
-        .status()
-        .expect("cargo build");
-    assert!(build.success(), "rsticulumd must build");
-
-    // Create config and start rust daemon
+    // Build (quiet) and start rsticulum daemon
+    // (binary should already exist from `cargo build` before running tests)
     let rust_dir = format!("{configdir}/rust");
     std::fs::create_dir_all(&rust_dir).unwrap();
     let key_file = format!("{rust_dir}/identity.key");
@@ -91,12 +85,13 @@ async fn test_rust_to_python_link() {
 
     let mut rust_daemon = Command::new("target/debug/rsticulumd")
         .args([&format!("{rust_dir}/daemon.toml")])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env("RUST_LOG", "error")
         .spawn()
         .expect("spawn rsticulumd");
 
-    // Read rust identity
+    // Read rust identity from stderr (tracing-subscriber writes there)
     let rust_identity = read_daemon_identity(&mut rust_daemon);
     eprintln!("Rust rsticulum identity: {rust_identity}");
 
@@ -147,21 +142,25 @@ fn read_python_identity(stdout: &mut impl std::io::Read) -> String {
 }
 
 fn read_daemon_identity(child: &mut Child) -> String {
-    let stdout = child.stdout.as_mut().expect("daemon stdout");
-    let mut reader = BufReader::new(stdout);
+    let stderr = child.stderr.as_mut().expect("daemon stderr");
+    let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => panic!("daemon stdout closed"),
+            Ok(0) => panic!("daemon stderr closed"),
             Ok(_) => {
                 eprint!("[rsticulumd] {line}");
                 if line.contains("Identity:") {
+                    // tracing format: "2024-...  INFO rsticulumd: Identity: <hash>"
                     let parts: Vec<&str> = line.split("Identity:").collect();
                     if parts.len() >= 2 {
                         return parts[1].trim().trim_matches('"').to_string();
                     }
+                }
+                if line.contains("No interfaces bound") {
+                    panic!("daemon failed to bind interfaces");
                 }
             }
             Err(_) => {
