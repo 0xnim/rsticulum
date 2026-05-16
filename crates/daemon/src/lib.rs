@@ -776,7 +776,7 @@ impl Daemon {
             tracing::info!("Link established with {actual_from} (responder)");
         } else if packet.context == rsticulum_packet::LRPROOF {
             // Completing a handshake we initiated — received LRPROOF response from responder.
-            // The proof_data format is: signature(64) + responder_eph_pub(32) + signalling(6)
+            // The proof_data format is: signature(64) + responder_eph_pub(32) + signalling(3)
             //
             // signed_data = link_id + responder_eph_pub + responder_identity_key + signalling
             //
@@ -822,13 +822,13 @@ impl Daemon {
             let mut responder_eph_pub_bytes = [0u8; 32];
             responder_eph_pub_bytes.copy_from_slice(&packet.data[64..96]);
 
-            // Signalling bytes (6 bytes)
-            let signalling = if packet.data.len() >= 102 {
-                let mut sig = [0u8; 6];
-                sig.copy_from_slice(&packet.data[96..102]);
+            // Signalling bytes (3 bytes) — Python RNS style
+            let signalling = if packet.data.len() >= 99 {
+                let mut sig = [0u8; 3];
+                sig.copy_from_slice(&packet.data[96..99]);
                 sig
             } else {
-                [0u8; 6]
+                [0u8; 3]
             };
 
             // Derive shared key via ECDH: our_eph_priv * responder_eph_pub
@@ -839,7 +839,7 @@ impl Daemon {
 
             // Verify responder's Ed25519 signature over:
             // signed_data = link_id + responder_eph_pub + responder_identity_key + signalling
-            let mut signed_data = Vec::with_capacity(16 + 32 + 32 + 6);
+            let mut signed_data = Vec::with_capacity(16 + 32 + 32 + 3);
             signed_data.extend_from_slice(&pending.link_id);
             signed_data.extend_from_slice(&responder_eph_pub_bytes);
             signed_data.extend_from_slice(&remote_key);
@@ -916,7 +916,7 @@ impl Daemon {
     /// LINKREQUEST data payload format:
     ///   - 32 bytes: initiator's ephemeral X25519 public key
     ///   - 32 bytes: initiator's Ed25519 signing public key
-    ///   - 6 bytes: signalling (MTU, flags, reserved)
+    ///   - 3 bytes: signalling (Python RNS format: MTU + mode)
     async fn handle_linkrequest(
         &mut self,
         from: rsticulum_identity::RnsAddress,
@@ -948,13 +948,13 @@ impl Daemon {
         let mut initiator_sig_pub = [0u8; 32];
         initiator_sig_pub.copy_from_slice(&packet.data[32..64]);
 
-        // Signalling bytes (6 bytes: MTU(2) + flags(1) + reserved(3))
-        let signalling = if packet.data.len() >= 70 {
-            let mut sig = [0u8; 6];
-            sig.copy_from_slice(&packet.data[64..70]);
+        // Signalling bytes (3 bytes: MTU + mode, Python RNS format)
+        let signalling = if packet.data.len() >= 67 {
+            let mut sig = [0u8; 3];
+            sig.copy_from_slice(&packet.data[64..67]);
             sig
         } else {
-            [0u8; 6]
+            [0u8; 3]
         };
 
         // Step 3: Compute link_id from packet hash
@@ -977,7 +977,7 @@ impl Daemon {
         // Step 7: Build LRPROOF response
         // signed_data = link_id + our_eph_pub + our_identity_key + signalling
         let our_identity_key = self.keys.identity_key_bytes();
-        let mut signed_data = Vec::with_capacity(16 + 32 + 32 + 6);
+        let mut signed_data = Vec::with_capacity(16 + 32 + 32 + 3);
         signed_data.extend_from_slice(&link_id);
         signed_data.extend_from_slice(our_eph_pub.as_bytes());
         signed_data.extend_from_slice(&our_identity_key);
@@ -986,8 +986,8 @@ impl Daemon {
         let signature = self.keys.sign(&signed_data);
         let sig_bytes = signature.to_bytes();
 
-        // proof_data = signature(64) + our_eph_pub_bytes(32) + signalling(6)
-        let mut proof_data = Vec::with_capacity(64 + 32 + 6);
+        // proof_data = signature(64) + our_eph_pub_bytes(32) + signalling(3)
+        let mut proof_data = Vec::with_capacity(64 + 32 + 3);
         proof_data.extend_from_slice(&sig_bytes);
         proof_data.extend_from_slice(our_eph_pub.as_bytes());
         proof_data.extend_from_slice(&signalling);
@@ -1015,14 +1015,16 @@ impl Daemon {
         self.channels.insert(from, channel);
 
         // Send LRPROOF response as a PROOF packet
+        // Per Python RNS: LRPROOF uses HEADER_1 with link_id in the dest_hash field,
+        // hops=0, context_flag=FLAG_UNSET
         let response_packet = rsticulum_packet::Packet {
             header_type: rsticulum_packet::HEADER_1,
-            context_flag: rsticulum_packet::FLAG_SET,
+            context_flag: rsticulum_packet::FLAG_UNSET,
             transport_type: rsticulum_packet::TRANSPORT_UNICAST,
             destination_type: rsticulum_packet::DEST_SINGLE,
             packet_type: rsticulum_packet::PROOF,
-            hops: rsticulum_packet::MAX_HOPS,
-            destination_hash: *from.as_bytes(),
+            hops: 0,
+            destination_hash: link_id,
             transport_id: None,
             context: rsticulum_packet::LRPROOF,
             data: proof_data,
@@ -1352,10 +1354,10 @@ impl Daemon {
         let sig_priv = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let sig_pub = sig_priv.verifying_key();
 
-        // 3. Build request_data: pub_bytes(32) + sig_pub_bytes(32) + signalling(6)
+        // 3. Build request_data: pub_bytes(32) + sig_pub_bytes(32) + signalling(3)
         let mut request_data = eph_pub.to_bytes().to_vec();
         request_data.extend_from_slice(&sig_pub.to_bytes());
-        request_data.extend_from_slice(&[0u8; 6]); // signalling: all 0 for now
+        request_data.extend_from_slice(&[0u8; 3]); // signalling: all 0 for now
 
         // 4. Send as LINKREQUEST (HEADER_1, broadcast/unicast)
         let packet = rsticulum_packet::Packet {
@@ -1549,20 +1551,25 @@ fn build_announce_packet(keys: &Keys) -> Packet {
 
 /// Compute a 16-byte link identifier from an incoming LINKREQUEST packet.
 ///
-/// Matches Python RNS behaviour: hash the raw packet bytes (excluding the
-/// first 2 flag/hop bytes and any appended signalling bytes), take the
-/// first 16 bytes of SHA-256.
+/// Matches Python RNS behaviour exactly:
+/// 1. Take `hashable_part = bytes([raw[0] & 0b00001111]) + raw[2:]`
+///    (Python's `get_hashable_part()`: masked flags nibble + everything after hops)
+/// 2. Strip trailing signalling bytes beyond ECPUBSIZE (64 bytes of key material)
+/// 3. SHA-256 → first 16 bytes
 fn compute_link_id_from_request(packet: &Packet) -> [u8; 16] {
     let raw = packet.to_bytes();
-    // Skip flags(1) + hops(1)
-    let hashable = &raw[2..];
-    // The ECDH key material occupies 64 bytes (32 pub + 32 sig_pub, no ratchet).
-    // Any remaining data after that are appended signalling bytes that must be
-    // excluded from the hashable part.
+    // Python: bytes([raw[0] & 0b00001111]) + raw[2:]
+    let mut hashable = Vec::with_capacity(raw.len());
+    hashable.push(raw[0] & 0x0F);
+    hashable.extend_from_slice(&raw[2..]);
+
+    // Strip appended signalling bytes (data beyond the 64 bytes of key material)
     const ECPUBSIZE: usize = 32 + 32;
     let diff = packet.data.len().saturating_sub(ECPUBSIZE);
-    let truncated = &hashable[..hashable.len().saturating_sub(diff)];
-    let hash = Sha256::digest(truncated);
+    let truncated_len = hashable.len().saturating_sub(diff);
+    hashable.truncate(truncated_len);
+
+    let hash = Sha256::digest(&hashable);
     let mut id = [0u8; 16];
     id.copy_from_slice(&hash[..16]);
     id
@@ -1627,13 +1634,13 @@ mod tests {
     fn test_compute_link_id_from_request() {
         // Build a LINKREQUEST packet with known data
         let dest = Keys::generate().rns_address();
-        let mut data = Vec::with_capacity(70);
+        let mut data = Vec::with_capacity(67);
         // 32 bytes ephemeral pub key
         data.extend_from_slice(&[0xAAu8; 32]);
         // 32 bytes signing pub key
         data.extend_from_slice(&[0xBBu8; 32]);
-        // 6 bytes signalling
-        data.extend_from_slice(&[0xCCu8; 6]);
+        // 3 bytes signalling
+        data.extend_from_slice(&[0xCCu8; 3]);
 
         let packet = rsticulum_packet::Packet::new_link_request(dest, data);
 
