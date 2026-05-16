@@ -13,7 +13,7 @@ pub use error::TransportError;
 pub use link::{Link, LinkConfig, LinkState};
 pub use packet_transport::{recv_packet, send_packet, PacketTransport};
 pub use proof::{generate_proof, verify_proof, verify_proof_with_public_key, Proof};
-pub use resource::{Resource, ResourceConfig, ResourceState, Segment, SegmentTracker};
+pub use resource::{Resource, ResourceAdvertisement, ResourceConfig, ResourceState, Segment, SegmentTracker};
 pub use suspendable::{SuspendableLink, SuspendableState, SuspendedSession};
 
 /// Interval at which KEEPALIVE packets are sent on idle links.

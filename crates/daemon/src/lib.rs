@@ -1044,7 +1044,10 @@ impl Daemon {
         // Process collected messages
         for msg in messages {
             tracing::debug!("Channel received {} bytes from {from}", msg.len());
-            // Try Resource segment first (Resource hash header)
+            // Try Resource segment first (bincode-deserialized)
+            // A ResourceAdvertisement will NOT parse as a valid Segment because
+            // its binary layout creates a Vec length too large for real data,
+            // so trying Segment first is safe.
             if msg.len() > 4 {
                 if let Ok(segment) = bincode::deserialize::<rsticulum_transport::Segment>(&msg) {
                     // Check if this segment belongs to an incoming resource
@@ -1068,7 +1071,28 @@ impl Daemon {
                         }
                         continue;
                     }
+                    // Segment deserialized but resource not registered yet.
+                    // Skip ICN fallback to avoid false positives.
+                    continue;
                 }
+            }
+            // Try ResourceAdvertisement (for new incoming resource transfers)
+            if let Ok(adv) = rsticulum_transport::ResourceAdvertisement::from_bytes(&msg) {
+                tracing::info!(
+                    "Resource advertisement: hash={:02x?}, size={}, segments={}",
+                    adv.hash,
+                    adv.total_size,
+                    adv.segment_count,
+                );
+                // Register incoming resource so subsequent segments can be matched
+                let resource = Resource::new_for_receiving(
+                    adv.hash.clone(),
+                    adv.total_size as usize,
+                    adv.segment_count,
+                    ResourceConfig::default(),
+                );
+                self.incoming_resources.insert(adv.hash.clone(), resource);
+                continue;
             }
             // Fallback: try ICN parsing
             if let Ok(data) = rsticulum_icn::Data::from_bytes(&msg) {
@@ -1187,6 +1211,8 @@ impl Daemon {
     }
 
     /// Send a resource (large data blob) over an established link.
+    /// First sends a ResourceAdvertisement so the receiver can prepare,
+    /// then sends all segments.
     async fn send_resource(
         &mut self,
         remote: rsticulum_identity::RnsAddress,
@@ -1198,15 +1224,34 @@ impl Daemon {
         let total = segments.len();
         let hash = resource.hash().to_vec();
 
-        // Register the receiving end on the remote side would need
-        // a separate resource advertisement message over the channel.
-        // For now, just send all segments.
+        // 1. Send ResourceAdvertisement first
+        let adv = rsticulum_transport::ResourceAdvertisement::new(
+            &resource,
+            &self.keys.rns_address(),
+        );
+        let adv_bytes = adv
+            .to_bytes()
+            .map_err(|e| DaemonError::Other(format!("serialize advertisement: {e}")))?;
+        self.send_over_link(remote, adv_bytes).await?;
+        tracing::debug!(
+            "Resource advertisement sent for {:02x?}: {} segments, {} bytes",
+            hash,
+            total,
+            data_len,
+        );
+
+        // 2. Send all segments
         for seg in &segments {
             let packed = bincode::serialize(seg)
                 .map_err(|e| DaemonError::Other(format!("serialize segment: {e}")))?;
             self.send_over_link(remote, packed).await?;
         }
-        tracing::info!("Resource {hash:02x?} sent: {total} segments, {data_len} bytes");
+        tracing::info!(
+            "Resource {:02x?} advertised and sent: {} segments, {} bytes",
+            hash,
+            total,
+            data_len,
+        );
         Ok(())
     }
 

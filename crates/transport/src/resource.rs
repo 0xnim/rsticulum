@@ -62,6 +62,50 @@ impl ResourceConfigBuilder {
     }
 }
 
+// ── ResourceAdvertisement ──
+
+/// Resource advertisement packet (sent before segments).
+///
+/// Advertises an upcoming resource transfer so the receiver can
+/// allocate storage and prepare to receive segments. Matches the
+/// Python RNS Resource advertisement pattern.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceAdvertisement {
+    /// Hash identifying the resource.
+    pub hash: Vec<u8>,
+    /// Total size of the resource data in bytes.
+    pub total_size: u64,
+    /// Number of segments.
+    pub segment_count: u32,
+    /// Compression type (0 = none).
+    pub compression: u8,
+    /// Advertising node's RNS address (16 bytes).
+    pub advertiser: [u8; 16],
+}
+
+impl ResourceAdvertisement {
+    /// Create a new advertisement from a [`Resource`] and the sender's address.
+    pub fn new(resource: &Resource, advertiser: &rsticulum_identity::RnsAddress) -> Self {
+        Self {
+            hash: resource.hash().to_vec(),
+            total_size: resource.total_size() as u64,
+            segment_count: resource.segment_count() as u32,
+            compression: 0,
+            advertiser: *advertiser.as_bytes(),
+        }
+    }
+
+    /// Serialize to bytes via bincode.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// Deserialize from bytes via bincode.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(data)
+    }
+}
+
 // ── Segment ──
 
 /// A single segment of a resource transfer.
@@ -401,6 +445,7 @@ impl Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsticulum_identity::RnsAddress;
 
     #[test]
     fn segment_checksum_verification() {
@@ -563,5 +608,63 @@ mod tests {
             .unwrap();
         assert!(!tracker.is_complete());
         assert_eq!(tracker.missing_count(), 2);
+    }
+    #[test]
+    fn resource_advertisement_roundtrip() {
+        let data = vec![0xAB; 2500];
+        let resource = Resource::new_for_sending(data, ResourceConfig::default());
+        let advertiser = RnsAddress::from_identity_key(&[0x42; 32]);
+
+        let adv = ResourceAdvertisement::new(&resource, &advertiser);
+        assert_eq!(adv.hash, resource.hash().to_vec());
+        assert_eq!(adv.total_size, resource.total_size() as u64);
+        assert_eq!(adv.segment_count, resource.segment_count() as u32);
+        assert_eq!(adv.compression, 0);
+        assert_eq!(adv.advertiser, *advertiser.as_bytes());
+
+        // Round-trip via bytes
+        let bytes = adv.to_bytes().expect("serialize advertisement");
+        let deserialized =
+            ResourceAdvertisement::from_bytes(&bytes).expect("deserialize advertisement");
+        assert_eq!(deserialized, adv);
+    }
+
+    #[test]
+    fn resource_advertisement_reject_garbage() {
+        let garbage = b"this is not a valid advertisement";
+        assert!(ResourceAdvertisement::from_bytes(garbage).is_err());
+    }
+
+    #[test]
+    fn resource_advertisement_creates_matching_resource() {
+        let data = vec![0x42; 5000];
+        let resource = Resource::new_for_sending(data, ResourceConfig::default());
+        let advertiser = RnsAddress::from_identity_key(&[0xAB; 32]);
+
+        let adv = ResourceAdvertisement::new(&resource, &advertiser);
+
+        // The receiver should be able to create a matching Resource
+        let mut recv_resource = Resource::new_for_receiving(
+            adv.hash.clone(),
+            adv.total_size as usize,
+            adv.segment_count,
+            ResourceConfig::default(),
+        );
+
+        assert_eq!(recv_resource.hash(), &adv.hash);
+        assert_eq!(recv_resource.total_size(), adv.total_size as usize);
+        assert_eq!(recv_resource.total_segments(), adv.segment_count);
+
+        // All segments from the sender should be accepted by the receiver
+        for seg in resource.all_segments() {
+            let complete = recv_resource.receive_segment(seg.clone()).unwrap();
+            if seg.index + 1 == resource.total_segments() {
+                assert!(complete);
+            } else {
+                assert!(!complete);
+            }
+        }
+        assert!(recv_resource.is_complete());
+        assert_eq!(recv_resource.data().unwrap(), resource.data().unwrap());
     }
 }
