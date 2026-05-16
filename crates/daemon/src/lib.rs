@@ -146,8 +146,7 @@ impl Daemon {
             }
 
             for (from, frame) in frames {
-                eprintln!("[FRAME] {} bytes from {from}", frame.len());
-                tracing::debug!("Received {} bytes from {}", frame.len(), from);
+                tracing::trace!("Received {} bytes from {}", frame.len(), from);
                 if let Err(e) = self.handle_frame(from, frame).await {
                     tracing::error!("Error handling frame from {from}: {e}");
                 }
@@ -348,7 +347,7 @@ impl Daemon {
         from: rsticulum_identity::RnsAddress,
         frame: Vec<u8>,
     ) -> Result<(), DaemonError> {
-        eprintln!("[FRAME] {} bytes from {from}", frame.len());
+        tracing::trace!("Received frame from {from}: {} bytes", frame.len());
         // Try to parse as an RNS packet
         let packet = match Packet::from_bytes(&frame) {
             Ok(pkt) => pkt,
@@ -662,7 +661,6 @@ impl Daemon {
         from: rsticulum_identity::RnsAddress,
         packet: &Packet,
     ) -> Result<(), DaemonError> {
-        eprintln!("[HANDLE_PROOF] PROOF from {from}, context={:#04x}, transport_id={:02x?}", packet.context, packet.transport_id);
         tracing::debug!("Received PROOF from {from}");
 
         // For LINKPROOF context: an incoming link request.
@@ -924,10 +922,6 @@ impl Daemon {
         from: rsticulum_identity::RnsAddress,
         packet: &Packet,
     ) -> Result<(), DaemonError> {
-        eprintln!(
-            "[HANDLE_LINKREQUEST] LINKREQUEST from {from}, data_len={}",
-            packet.data.len()
-        );
         tracing::debug!("Received LINKREQUEST from {from}");
 
         // Minimum data: pub_bytes(32) + sig_pub_bytes(32) = 64 bytes
@@ -1399,13 +1393,7 @@ impl Daemon {
         self.pending_links.insert(remote, pending);
 
         let data = packet.to_bytes();
-        eprintln!(
-            "[CONNECT] Sending LINKREQUEST to {remote}, {} bytes via {} mediums",
-            data.len(),
-            self.media.len()
-        );
         let result = self.send_to(remote, &data).await;
-        eprintln!("[CONNECT] send_to result: {result:?}");
         tracing::info!("LINKREQUEST sent to {remote}, link_id={:02x?}", link_id);
         result
     }

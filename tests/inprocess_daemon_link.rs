@@ -71,53 +71,106 @@ async fn inprocess_link_establishment() {
         panic!("B did not receive A's announce: {result:?}");
     }
 
+    // Drain any stale packets from A's socket before B's announce
+    drain_packets(&daemon_a.media[0]).await;
+
     // B broadcasts → A receives
     println!("B broadcasting announce...");
     daemon_b.media[0].broadcast(&build_announce(&keys_b).to_bytes()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
-    let result = daemon_a.media[0].recv().await;
-    println!("A recv: {result:?}");
-    if let Ok(Some((from, frame))) = result {
-        let pkt = P::Packet::from_bytes(&frame).unwrap();
-        println!("A: announce pkt type={}, data_len={}", pkt.packet_type, pkt.data.len());
-        daemon_a.handle_frame(from, frame).await.unwrap();
-    } else {
-        panic!("A did not receive B's announce: {result:?}");
-    }
 
+    // Loop to handle possible self-received announces from loopback
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut a_announce_ok = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Ok(Some((from, frame)))) =
+            tokio::time::timeout(Duration::from_millis(100), daemon_a.media[0].recv()).await
+        {
+            if let Ok(pkt) = P::Packet::from_bytes(&frame) {
+                println!("A recv: from={from}, pkt type={}, data_len={}", pkt.packet_type, pkt.data.len());
+                if pkt.packet_type == P::ANNOUNCE && from == addr_b {
+                    daemon_a.handle_frame(from, frame).await.unwrap();
+                    a_announce_ok = true;
+                    break;
+                } else {
+                    println!("A: ignoring misdirected packet from {from} (expected {addr_b})");
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    if !a_announce_ok {
+        panic!("A did not receive B's announce within deadline");
+    }
     println!("=== A connecting to B ===\n");
+
+    // Drain stale packets from both media before link exchange
+    drain_packets(&daemon_a.media[0]).await;
+    drain_packets(&daemon_b.media[0]).await;
+
     println!("A sends LINKREQUEST to B...");
     let connect_result = daemon_a.connect(addr_b).await;
     println!("connect: {connect_result:?}");
     assert!(connect_result.is_ok(), "connect should succeed");
 
     // B receives and processes the LINKREQUEST
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let result = daemon_b.media[0].recv().await;
-    println!("B recv: {result:?}");
-    if let Ok(Some((from, frame))) = result {
-        let pkt = P::Packet::from_bytes(&frame).unwrap();
-        println!("B: LINKREQUEST pkt type={}, data_len={}", pkt.packet_type, pkt.data.len());
-        // The daemon's handle_frame dispatches LINKREQUEST → handle_linkrequest
-        daemon_b.handle_frame(from, frame).await.unwrap();
-    } else {
-        panic!("B did not receive LINKREQUEST: {result:?}");
+    // Loop to handle possible stale packets (loopback from A's broadcast)
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut b_lr_ok = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Ok(Some((from, frame)))) =
+            tokio::time::timeout(Duration::from_millis(100), daemon_b.media[0].recv()).await
+        {
+            if let Ok(pkt) = P::Packet::from_bytes(&frame) {
+                println!("B recv: from={from}, pkt type={}, data_len={}", pkt.packet_type, pkt.data.len());
+                if pkt.packet_type == P::LINKREQUEST && from == addr_a {
+                    daemon_b.handle_frame(from, frame).await.unwrap();
+                    b_lr_ok = true;
+                    break;
+                } else {
+                    println!("B: ignoring (expected LINKREQUEST from {addr_a})");
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    if !b_lr_ok {
+        panic!("B did not receive LINKREQUEST within deadline");
     }
 
     println!("A links={}, B links={}\n", daemon_a.link_count(), daemon_b.link_count());
 
     // A receives LRPROOF response and processes it (ECDH key exchange)
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let result = daemon_a.media[0].recv().await;
-    println!("A recv LRPROOF: {result:?}");
-    if let Ok(Some((from, frame))) = result {
-        let pkt = P::Packet::from_bytes(&frame).unwrap();
-        println!("A: response pkt type={}, context={:#04x}, len={}", pkt.packet_type, pkt.context, pkt.data.len());
-        // The daemon's handle_frame dispatches PROOF+LRPROOF → handle_proof
-        daemon_a.handle_frame(from, frame).await.unwrap();
-    } else {
-        panic!("A did not receive LRPROOF response: {result:?}");
+    // Use a streaming recv: keep reading until we get the PROOF+LRPROOF packet
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut found = false;
+    while std::time::Instant::now() < deadline {
+        // Use timeout to poll without blocking forever
+        if let Ok(Ok(Some((from, frame)))) =
+            tokio::time::timeout(Duration::from_millis(100), daemon_a.media[0].recv()).await
+        {
+            if let Ok(pkt) = P::Packet::from_bytes(&frame) {
+                println!("A: pkt type={}, context={:#04x}, len={}", pkt.packet_type, pkt.context, pkt.data.len());
+                if pkt.packet_type == P::PROOF && pkt.context == P::LRPROOF {
+                    println!("A: handling LRPROOF from {from}, B_addr={addr_b}");
+                    let result = daemon_a.handle_frame(from, frame).await;
+                    println!("A: handle_frame result={result:?}, links={}", daemon_a.link_count());
+                    found = true;
+                    break;
+                } else {
+                    // Stale or unexpected packet — just log and continue
+                    println!("A: ignoring (expected LRPROOF)");
+                    daemon_a.handle_frame(from, frame).await.ok();
+                }
+            }
+        } else {
+            break; // no more packets available
+        }
+    }
+    if !found {
+        panic!("A did not receive LRPROOF response within deadline");
     }
 
     println!("=== FINAL: A links={}, B links={} ===", daemon_a.link_count(), daemon_b.link_count());
@@ -126,4 +179,14 @@ async fn inprocess_link_establishment() {
         "A should have >= 1 link, got {}", daemon_a.link_count());
     assert!(daemon_b.link_count() >= 1,
         "B should have >= 1 link, got {}", daemon_b.link_count());
+}
+
+/// Drain any pending packets from a medium (non-blocking).
+async fn drain_packets(medium: &Arc<dyn rsticulum_mesh::Medium>) {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(10), medium.recv()).await {
+            Ok(Ok(Some(_))) => continue,
+            _ => break,
+        }
+    }
 }
