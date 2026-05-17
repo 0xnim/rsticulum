@@ -14,9 +14,9 @@ do wrong for a no-IP/no-TCP/no-HTTP internet, and exactly what must be modified.
 | Identity-derived 16-byte addresses (SHA-256 truncated) | Correct for edge — collision risk at scale is acceptable when backbone does full-key routing; 16 bytes keeps packet headers small on low-bandwidth links (LoRa, serial) |
 | Physical-medium agnosticism (serial, UDP, radio, I2P) | This is the whole point — any medium is a valid network link |
 | Announce-based peer discovery | Correct for edge meshes where topology is flat and nodes come and go |
-| Proof handshake for link establishment | Zero-RTT trust verification using Ed25519 — no PKI, no third party, no round trips to a CA |
+| Proof handshake for link establishment | Zero-RTT trust verification using Ed25519 (RFC 8032) — no PKI, no third party, no round trips to a CA |
 | KISS/HDLC framing over serial/TCP | Proven wire formats, byte-compatible with existing hardware TNCs and SDRs |
-| AES-128-CBC + HMAC-SHA256 packet encryption | Adequate for edge; the key derivation (ECDH + HKDF) is correct; the crypto primitives are standard and auditable |
+| AES-256-CBC + HMAC-SHA256 via Token (simplified Fernet) | Python RNS default is AES-256-CBC. rsticulum currently uses AES-128-CBC — known compatibility gap. Key derivation (ECDH + HKDF) is correct; crypto primitives are standard and auditable |
 
 ### Change
 
@@ -75,24 +75,28 @@ a *route summary* (hash prefix + path quality) to the backbone, not the raw
 announce. The backbone pushes a similar summary down to the bridge, which
 caches it for edge nodes that request routes.
 
-#### 1d. Baked-in SuspendableLink as the standard link protocol
+#### 1d. Merge SuspendableLink session persistence into Link as a configuration option
 
-**What:** The current `rsticulum-transport::SuspendableLink` exists as an
-optional add-on. It must become the *only* link type — all links are
-suspendable, always. Remove the non-suspendable `Link` entirely or demote it
-to a simple wrapper.
+**What:** The current `rsticulum-transport::SuspendableLink` wraps `Link`
+to add session persistence (serialized derived keys + held messages across
+disconnections). Merge this persistence directly into `Link` as a
+configuration option — `Link` is the core encryption engine, and all links
+support `suspend: true|false` via `LinkConfig`. No separate wrapper type.
 
 **Why:** The vision says "no TCP" — connections must survive hours/days of
-disconnection. If a developer reaches for `Link` (non-suspendable) and uses
-it in production, their app breaks when the network glitches. Making
-suspendable the default means every application automatically gets
-disruption tolerance — no opt-in, no forgetting, no surprise failures.
+disconnection. If a developer uses the non-suspendable `Link` and deploys
+it, their app breaks on network glitches. Making suspension a native
+configuration option on `Link` means every application automatically gets
+disruption tolerance unless they explicitly opt out (`suspend: false` for
+TCP-like semantics). The developer must consciously choose to disable it,
+rather than forgetting to opt in.
 
-**How:** Rename `SuspendableLink` to `Link`, remove the old `Link`. The
-session persistence (serialized derived keys + held messages) is always on.
-The old `Link` behavior becomes a configuration option: `immediate_close:
-true` for applications that specifically want TCP-like semantics (and
-they'd have to think about why).
+**How:** Move the session persistence logic from `SuspendableLink` into
+`Link::new(config: LinkConfig)`. `LinkConfig` gains a `suspend: bool`
+field, defaulting to `true`. The old `SuspendableLink` is deprecated and
+removed. The `Link` API is unchanged for callers — only the internal
+behavior differs, transparently holding messages and resuming sessions
+across transport interruptions.
 
 #### 1e. Add proof-of-work to announce packets (anti-spam)
 
@@ -218,6 +222,15 @@ the hop fields for the target layer.
 ---
 
 ## 3. ICN / NDN (Application Layer)
+
+> ⚠️ **DESIGN NOTE:** Rather than stacking ICN as a separate application layer,
+> the preferred approach is to add ICN capabilities as Reticulum protocol
+> extensions (new packet types: `Interest`, `Data`). Because Reticulum relays
+> already see plaintext during forwarding, in-network caching and Interest
+> aggregation can be added directly to the transport layer without a separate
+> ICN stack. The adaptations below describe the full ICN/NDN-influenced feature
+> set (informed by CCNx, RFC 8569, and NDN, RFC 8793); the implementation
+> should integrate them into Reticulum's own packet type space.
 
 ### Keep As-Is
 
@@ -415,7 +428,7 @@ Phase               Layer               Deliverable
                                         destination, interface, mesh, channel,
                                         buffer, crypto, daemon)
 
-2. Protocol         Edge + Transport    SuspendableLink as default
+2. Protocol         Edge + Transport    SuspendableLink merged into Link
    Evolution                            Hierarchical announce forwarding
                                         Proof-of-work anti-spam
                                         Key delegation

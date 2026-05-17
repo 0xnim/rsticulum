@@ -1,0 +1,27 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Runtime data
+.rsticulum/
+
+# Local only
+reference-reticulum/
+bridge.py
+--help
