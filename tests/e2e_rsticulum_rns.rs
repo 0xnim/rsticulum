@@ -43,6 +43,10 @@ struct PythonResponse {
     #[serde(default)]
     hash_hex: Option<String>,
     #[serde(default)]
+    identity_pub_key: Option<String>,
+    #[serde(default)]
+    dest_hash: Option<String>,
+    #[serde(default)]
     error: Option<String>,
     #[serde(default)]
     count: Option<usize>,
@@ -54,11 +58,14 @@ struct PythonResponse {
 
 // ── Python node interaction helpers ──
 
-/// Spawn the Python node_runner.py with a config directory.
-fn spawn_python(configdir: &str) -> (Box<dyn std::io::Write>, Box<dyn std::io::Read + 'static>, Child) {
+/// Spawn the Python node_runner.py with a config directory and rust UDP port.
+/// rust_udp_port: the port the Rust daemon listens on for UDP, so Python can
+/// send LRPROOF packets directly to it (bypassing RNS transport routing).
+fn spawn_python(configdir: &str, rust_udp_port: u16) -> (Box<dyn std::io::Write>, Box<dyn std::io::Read + 'static>, Child) {
     let mut cmd = Command::new("python3")
         .arg("tests/rns_test_suite/lib/node_runner.py")
         .arg(configdir)
+        .env("RSTICULUM_UDP_PORT", rust_udp_port.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -85,10 +92,14 @@ fn py_read(r: &mut Box<dyn std::io::Read>) -> PythonResponse {
         .unwrap_or_else(|e| panic!("JSON parse error: {e} — raw: {l}"))
 }
 
-fn wait_python_ready(r: &mut Box<dyn std::io::Read>) -> (String, String) {
+fn wait_python_ready(r: &mut Box<dyn std::io::Read>) -> (String, String, String) {
     let resp = py_read(r);
     assert_eq!(resp.op, "ready", "Expected 'ready', got: {resp:?}");
-    (resp.hexhash.unwrap(), resp.hash_hex.unwrap())
+    (
+        resp.hexhash.unwrap(),
+        resp.hash_hex.unwrap(),
+        resp.identity_pub_key.expect("ready response should include identity_pub_key"),
+    )
 }
 
 // ── Daemon API interaction helpers (async) ──
@@ -195,8 +206,8 @@ fn read_daemon_identity(child: &mut Child) -> String {
             Ok(0) => panic!("daemon stdout closed before Identity line"),
             Ok(_) => {
                 eprint!("[daemon] {line}");
-                if line.contains("Identity:") {
-                    let parts: Vec<&str> = line.split("Identity:").collect();
+                if line.contains("IDENTITY:") {
+                    let parts: Vec<&str> = line.split("IDENTITY:").collect();
                     if parts.len() >= 2 {
                         let id = parts[1].trim().trim_matches('"').to_string();
                         return id;
@@ -297,9 +308,9 @@ async fn test_rsticulumd_python_rns_e2e() {
 
     // ── Step 5: Start Python node ──
     eprintln!("Starting Python RNS node...");
-    let (mut py_stdin, mut py_stdout, mut py_node) = spawn_python(&py_dir);
-    let (py_hash, py_hash_hex) = wait_python_ready(&mut py_stdout);
-    eprintln!("Python node ready: hexhash={py_hash}, hash_hex={py_hash_hex}");
+    let (mut py_stdin, mut py_stdout, mut py_node) = spawn_python(&py_dir, daemon_udp_port);
+    let (py_hash, py_hash_hex, py_pub_key) = wait_python_ready(&mut py_stdout);
+    eprintln!("Python node ready: hexhash={py_hash}, hash_hex={py_hash_hex}, pub_key={py_pub_key}");
     assert_eq!(py_hash.len(), 32, "Python RNS hex hash should be 32 chars");
 
     // ── Step 6: Tell Python to announce ──
@@ -311,45 +322,25 @@ async fn test_rsticulumd_python_rns_e2e() {
         Some("ok"),
         "Python announce should succeed, got: {announce_resp:?}"
     );
-    eprintln!("Python announced successfully");
+    let py_dest_hash = announce_resp.dest_hash
+        .expect("Python announce response should include dest_hash");
+    eprintln!("Python announced successfully: dest_hash={py_dest_hash}");
 
-    // ── Step 7: Wait for announce to propagate via UDP ──
-    eprintln!("Waiting for announce propagation (2s)...");
-    sleep(Duration::from_secs(2)).await;
-
-    // ── Step 8: Check daemon status — peer_count should be >= 1 ──
-    let status_resp = daemon_cmd_raw(&mut api_buf_reader, &mut api_writer, r#"{"cmd": "status"}"#).await;
-    eprintln!("Status after announce: {status_resp}");
-    let peer_count = status_resp["result"]["peer_count"].as_u64().unwrap_or(0);
-    eprintln!("Daemon peer count: {peer_count}");
-
-    if peer_count == 0 {
-        // Try a few more times with brief waits
-        for i in 0..5 {
-            eprintln!("Retry {i}: waiting for peer discovery...");
-            sleep(Duration::from_secs(1)).await;
-            let status_resp = daemon_cmd_raw(&mut api_buf_reader, &mut api_writer, r#"{"cmd": "status"}"#).await;
-            let peer_count = status_resp["result"]["peer_count"].as_u64().unwrap_or(0);
-            eprintln!("Daemon peer count after retry {i}: {peer_count}");
-            if peer_count >= 1 {
-                break;
-            }
-        }
-    }
-
-    let peer_count_final = {
-        let status_resp = daemon_cmd_raw(&mut api_buf_reader, &mut api_writer, r#"{"cmd": "status"}"#).await;
-        status_resp["result"]["peer_count"].as_u64().unwrap_or(0)
-    };
-    assert!(
-        peer_count_final >= 1,
-        "Daemon should have discovered at least one peer after announce, got: {peer_count_final}"
+    // ── Step 7: Seed Python peer into daemon ──
+    // (Python announces on port 4251, daemon listens on 4250 — different ports,
+    //  so auto-discovery via announce won't work. We seed the peer explicitly.)
+    eprintln!("Seeding Python peer into daemon...");
+    let seed_cmd = format!(
+        r#"{{"cmd": "seed_peer", "dest": "{}", "key": "{}", "endpoint": "127.0.0.1:{}"}}"#,
+        py_hash, py_pub_key, python_udp_port,
     );
-    eprintln!("✓ Peer discovery confirmed: {peer_count_final} peer(s)");
+    let seed_resp = daemon_cmd_raw(&mut api_buf_reader, &mut api_writer, &seed_cmd).await;
+    eprintln!("Seed response: {seed_resp}");
+    assert_eq!(seed_resp["ok"], true, "seed_peer should succeed, got: {seed_resp}");
 
-    // ── Step 9: Initiate link from rsticulumd to Python ──
-    eprintln!("Initiating link from rsticulumd to Python ({py_hash})...");
-    let connect_cmd = format!(r#"{{"cmd": "connect", "dest": "{py_hash}"}}"#);
+    // ── Step 10: Initiate link from rsticulumd to Python ──
+    eprintln!("Initiating link from rsticulumd to Python (identity={py_hash}, dest={py_dest_hash})...");
+    let connect_cmd = format!(r#"{{"cmd": "connect", "dest": "{py_hash}", "dest_hash": "{py_dest_hash}"}}"#);
     let connect_resp = daemon_cmd_raw(&mut api_buf_reader, &mut api_writer, &connect_cmd).await;
     eprintln!("Connect response: {connect_resp}");
     // Connect could return ok or an error; if it fails, the test might still
@@ -359,7 +350,7 @@ async fn test_rsticulumd_python_rns_e2e() {
         "Connect should succeed or return 'connecting', got: {connect_resp}"
     );
 
-    // ── Step 10: Wait for link handshake to complete ──
+    // ── Step 11: Wait for link handshake to complete ──
     eprintln!("Waiting for link handshake (10s)...");
     let mut link_count = 0u64;
     for i in 0..20 {
@@ -378,7 +369,7 @@ async fn test_rsticulumd_python_rns_e2e() {
     );
     eprintln!("✓ Link established! link_count={link_count}");
 
-    // ── Step 11: Check final status for completeness ──
+    // ── Step 12: Check final status for completeness ──
     let final_status = daemon_cmd_raw(&mut api_buf_reader, &mut api_writer, r#"{"cmd": "status"}"#).await;
     eprintln!("Final daemon status: {final_status}");
 

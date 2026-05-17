@@ -29,9 +29,12 @@ pub enum ApiCommand {
     Status {
         response: oneshot::Sender<DaemonStatus>,
     },
-    /// Initiate a link to a peer.
+    /// Initiate a link to a peer, optionally targeting a specific destination hash.
     Connect {
         dest: [u8; 16],
+        /// Optional: the destination hash to use in the LINKREQUEST packet.
+        /// If None, uses the peer's identity address (dest).
+        dest_hash: Option<[u8; 16]>,
         response: oneshot::Sender<Result<(), String>>,
     },
     /// Send data over an established link.
@@ -300,10 +303,17 @@ async fn handle_connect(
         }
     };
 
+    // Optional dest_hash field — if provided, use it as the LINKREQUEST destination hash
+    let dest_hash: Option<[u8; 16]> = request.get("dest_hash").and_then(|d| d.as_str()).and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        bytes.try_into().ok()
+    });
+
     let (tx, rx) = oneshot::channel();
     if cmd_tx
         .send(ApiCommand::Connect {
             dest,
+            dest_hash,
             response: tx,
         })
         .is_err()

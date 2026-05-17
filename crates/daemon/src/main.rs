@@ -61,6 +61,17 @@ async fn main() {
     // Load or generate identity
     let keys = load_or_generate_keys(&config.identity.key_file);
     tracing::info!("Identity: {}", keys.rns_address());
+    // Write identity to stderr with explicit flush (reliable through pipes)
+    // Also tracing-subscriber writes to stdout, so output identity to stdout
+    {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "IDENTITY:{}", keys.rns_address());
+        let _ = stdout.flush();
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "IDENTITY:{}", keys.rns_address());
+        let _ = stderr.flush();
+    }
 
     // Create daemon
     let mut daemon = Daemon::new(keys);

@@ -51,30 +51,34 @@ pub const HEADER_2: u8 = 0x01;
 
 /// Context constants (wire-compatible with Python RNS).
 pub const NONE: u8 = 0x00;
-pub const PATH_RESPONSE: u8 = 0xF0;
-pub const CACHE_REQUEST: u8 = 0xF1;
-pub const REQUEST: u8 = 0xF2;
-pub const RESPONSE: u8 = 0xF3;
-pub const COMMAND: u8 = 0xF4;
-pub const SINGLE: u8 = 0xF5;
-pub const GROUP: u8 = 0xF6;
-pub const RESOURCE: u8 = 0xFA;
-pub const RESOURCE_PRF: u8 = 0xFB;
-pub const RESOURCE_ADV: u8 = 0xFC;
-pub const RESOURCE_REQ: u8 = 0xFD;
-pub const RESOURCE_HMU: u8 = 0xFE;
+pub const RESOURCE: u8 = 0x01;
+pub const RESOURCE_ADV: u8 = 0x02;
+pub const RESOURCE_REQ: u8 = 0x03;
+pub const RESOURCE_HMU: u8 = 0x04;
+pub const RESOURCE_PRF: u8 = 0x05;
+pub const RESOURCE_ICL: u8 = 0x06;
+pub const RESOURCE_RCL: u8 = 0x07;
+pub const CACHE_REQUEST: u8 = 0x08;
+pub const REQUEST: u8 = 0x09;
+pub const RESPONSE: u8 = 0x0A;
+pub const PATH_RESPONSE: u8 = 0x0B;
+pub const COMMAND: u8 = 0x0C;
+pub const COMMAND_STATUS: u8 = 0x0D;
+pub const CHANNEL: u8 = 0x0E;
 pub const LINKIDENTITY: u8 = 0xFB;
 pub const LINKCLOSE: u8 = 0xFC;
 pub const LINKPROOF: u8 = 0xFD;
-pub const KEEPALIVE: u8 = 0x06;
-pub const LRRTT: u8 = 0x07;
+pub const KEEPALIVE: u8 = 0xFA;
+pub const LRRTT: u8 = 0xFE;
 pub const LRPROOF: u8 = 0xFF;
 
 /// Context constant for ratchet key rotation (forward secrecy).
-pub const RATCHET: u8 = 0x0A;
+/// Not a standard RNS context — rsticulum extension.
+pub const RATCHET: u8 = 0x0F;
 
 /// Context constant for path requests (DATA packets used for path discovery).
-pub const PATH_REQUEST: u8 = 0x01;
+/// Not a standard RNS context — rsticulum extension.
+pub const PATH_REQUEST: u8 = 0x10;
 
 /// Destination type constants.
 pub const DEST_SINGLE: u8 = 0x00;
@@ -399,7 +403,24 @@ mod tests {
         assert_eq!(HEADER_1, 0x00);
         assert_eq!(HEADER_2, 0x01);
         assert_eq!(NONE, 0x00);
+        assert_eq!(RESOURCE, 0x01);
+        assert_eq!(RESOURCE_ADV, 0x02);
+        assert_eq!(RESOURCE_REQ, 0x03);
+        assert_eq!(RESOURCE_HMU, 0x04);
+        assert_eq!(RESOURCE_PRF, 0x05);
+        assert_eq!(CACHE_REQUEST, 0x08);
+        assert_eq!(REQUEST, 0x09);
+        assert_eq!(RESPONSE, 0x0A);
+        assert_eq!(PATH_RESPONSE, 0x0B);
+        assert_eq!(COMMAND, 0x0C);
+        assert_eq!(KEEPALIVE, 0xFA);
+        assert_eq!(LINKIDENTITY, 0xFB);
+        assert_eq!(LINKCLOSE, 0xFC);
+        assert_eq!(LINKPROOF, 0xFD);
+        assert_eq!(LRRTT, 0xFE);
         assert_eq!(LRPROOF, 0xFF);
+        assert_eq!(RATCHET, 0x0F);
+        assert_eq!(PATH_REQUEST, 0x10);
         assert_eq!(DEST_SINGLE, 0x00);
         assert_eq!(DEST_LINK, 0x01);
         assert_eq!(FLAG_UNSET, 0x00);
@@ -681,17 +702,28 @@ mod tests {
     fn all_context_constants_roundtrip() {
         let contexts = [
             NONE,
-            PATH_RESPONSE,
-            CACHE_REQUEST,
-            REQUEST,
-            RESPONSE,
-            COMMAND,
-            KEEPALIVE,
-            RESOURCE_PRF,
+            RESOURCE,
             RESOURCE_ADV,
             RESOURCE_REQ,
             RESOURCE_HMU,
+            RESOURCE_PRF,
+            RESOURCE_ICL,
+            RESOURCE_RCL,
+            CACHE_REQUEST,
+            REQUEST,
+            RESPONSE,
+            PATH_RESPONSE,
+            COMMAND,
+            COMMAND_STATUS,
+            CHANNEL,
+            KEEPALIVE,
+            LINKIDENTITY,
+            LINKCLOSE,
+            LINKPROOF,
+            LRRTT,
             LRPROOF,
+            RATCHET,
+            PATH_REQUEST,
         ];
 
         for ctx in contexts {

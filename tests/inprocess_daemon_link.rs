@@ -110,7 +110,7 @@ async fn inprocess_link_establishment() {
     drain_packets(&daemon_b.media[0]).await;
 
     println!("A sends LINKREQUEST to B...");
-    let connect_result = daemon_a.connect(addr_b).await;
+    let connect_result = daemon_a.connect(addr_b, None).await;
     println!("connect: {connect_result:?}");
     assert!(connect_result.is_ok(), "connect should succeed");
 

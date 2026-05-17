@@ -147,6 +147,10 @@ impl Daemon {
 
             for (from, frame) in frames {
                 tracing::trace!("Received {} bytes from {}", frame.len(), from);
+                tracing::info!("INCOMING FRAME: {} bytes from {}", frame.len(), from);
+                // Hex-dump first 50 bytes for debugging
+                let hex_preview: String = frame.iter().take(50).map(|b| format!("{:02x}", b)).collect();
+                tracing::debug!("INCOMING FRAME HEX: {}...", hex_preview);
                 if let Err(e) = self.handle_frame(from, frame).await {
                     tracing::error!("Error handling frame from {from}: {e}");
                 }
@@ -209,6 +213,7 @@ impl Daemon {
                         let _ = response.send(Ok(()));
                     }
                     crate::api::ApiCommand::Status { response } => {
+                        eprintln!("[DAEMON_DEBUG] keys.rns_address() = {}", self.keys.rns_address());
                         let status = crate::api::DaemonStatus {
                             address: self.keys.rns_address().to_string(),
                             link_count: self.channels.len(),
@@ -217,11 +222,11 @@ impl Daemon {
                         };
                         let _ = response.send(status);
                     }
-                    crate::api::ApiCommand::Connect { dest, response } => {
+                    crate::api::ApiCommand::Connect { dest, dest_hash, response } => {
                         let addr = rsticulum_identity::RnsAddress::from_bytes(&dest)
                             .expect("valid 16-byte address");
                         let _ = response
-                            .send(self.connect(addr).await.map_err(|e| e.to_string()));
+                            .send(self.connect(addr, dest_hash).await.map_err(|e| e.to_string()));
                     }
                     crate::api::ApiCommand::SeedPeer { dest, key_hex, udp_endpoint, response } => {
                         let addr = rsticulum_identity::RnsAddress::from_bytes(&dest)
@@ -711,18 +716,17 @@ impl Daemon {
             from
         };
 
-        // Check if we have the remote's signing key
-        let remote_key = match self.peer_keys.get(&actual_from) {
-            Some(k) => *k,
-            None => {
-                tracing::debug!("No known peer key for {actual_from} — ignoring proof");
-                return Ok(());
-            }
-        };
-
         let local_dest = Destination::singleton(self.keys.clone(), "daemon", vec![]);
 
         if packet.context == LINKPROOF {
+            // Check if we have the remote's signing key
+            let remote_key = match self.peer_keys.get(&actual_from) {
+                Some(k) => *k,
+                None => {
+                    tracing::debug!("No known peer key for {actual_from} — ignoring LINKPROOF");
+                    return Ok(());
+                }
+            };
             // Remote is initiating a link to us.
             // NOTE: The initiator's transport_id (from packet header) is different
             // from the responder's transport_id (from Link::new with local dest).
@@ -784,24 +788,78 @@ impl Daemon {
             // encryption key via HKDF, and set the link to Established.
 
             // Look up our pending channel and pending link data
-            let mut channel = match self.pending_channels.remove(&actual_from) {
-                Some(c) => c,
+            // The UDP medium may have set actual_from to the packet's destination_hash
+            // (the link_id) instead of the remote peer's identity. Try direct lookup
+            // first, then fall back to searching by link_id.
+            let (mut channel, remote_identity) = match self.pending_channels.remove(&actual_from) {
+                Some(c) => {
+                    // actual_from was the correct identity address
+                    (c, actual_from)
+                }
                 None => {
-                    tracing::debug!(
-                        "LRPROOF from {actual_from} but no pending channel — ignoring"
-                    );
-                    return Ok(());
+                    // Fallback: find pending channel by matching link_id from packet destination_hash
+                    let link_id = packet.destination_hash;
+                    let found_key = self.pending_channels.iter().find_map(|(key, ch)| {
+                        if ch.link().link_id() == &link_id {
+                            Some(*key)
+                        } else {
+                            None
+                        }
+                    });
+                    match found_key {
+                        Some(key) => {
+                            let ch = self.pending_channels.remove(&key).unwrap();
+                            tracing::debug!("LRPROOF matched pending channel by link_id for {key}");
+                            (ch, key)
+                        }
+                        None => {
+                            tracing::debug!(
+                                "LRPROOF from {actual_from} but no pending channel — ignoring"
+                            );
+                            return Ok(());
+                        }
+                    }
                 }
             };
 
+            // Also find pending_links data — try direct lookup first, then by link_id
             let pending = match self.pending_links.remove(&actual_from) {
                 Some(p) => p,
                 None => {
+                    let link_id = packet.destination_hash;
+                    let found_key = self.pending_links.iter().find_map(|(key, pl)| {
+                        if pl.link_id == link_id {
+                            Some(*key)
+                        } else {
+                            None
+                        }
+                    });
+                    match found_key {
+                        Some(key) => {
+                            tracing::debug!("LRPROOF matched pending_links by link_id for {key}");
+                            self.pending_links.remove(&key).unwrap()
+                        }
+                        None => {
+                            tracing::debug!(
+                                "LRPROOF from {actual_from} but no pending_links data — ignoring"
+                            );
+                            // Re-insert the pending channel for idempotency
+                            self.pending_channels.insert(actual_from, channel);
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+
+            // Now look up the remote's signing key using the actual identity address
+            let remote_key = match self.peer_keys.get(&remote_identity) {
+                Some(k) => *k,
+                None => {
                     tracing::debug!(
-                        "LRPROOF from {actual_from} but no pending_links data — ignoring"
+                        "LRPROOF from {remote_identity}: no known peer key — ignoring"
                     );
                     // Re-insert the pending channel for idempotency
-                    self.pending_channels.insert(actual_from, channel);
+                    self.pending_channels.insert(remote_identity, channel);
                     return Ok(());
                 }
             };
@@ -895,12 +953,12 @@ impl Daemon {
                 context: LRRTT,
                 data: rtt_ms.to_le_bytes().to_vec(),
             };
-            let _ = self.send_to(actual_from, &rtt_probe.to_bytes()).await;
+            let _ = self.send_to(remote_identity, &rtt_probe.to_bytes()).await;
 
-            self.channels.insert(actual_from, channel);
+            self.channels.insert(remote_identity, channel);
 
             tracing::info!(
-                "Link established with {actual_from} (initiator), link_id={:02x?}",
+                "Link established with {remote_identity} (initiator), link_id={:02x?}",
                 pending.link_id
             );
         }
@@ -1341,7 +1399,11 @@ impl Daemon {
     ///
     /// Sends a LINKREQUEST with ephemeral X25519 + Ed25519 keys,
     /// stores pending state for the LRPROOF response.
-    pub async fn connect(&mut self, remote: rsticulum_identity::RnsAddress) -> Result<(), DaemonError> {
+    ///
+    /// If `dest_hash` is provided, it's used as the LINKREQUEST packet's
+    /// destination_hash (to target a specific RNS Destination rather than
+    /// the peer's identity address). If None, uses the peer's identity address.
+    pub async fn connect(&mut self, remote: rsticulum_identity::RnsAddress, dest_hash: Option<[u8; 16]>) -> Result<(), DaemonError> {
         if self.channels.contains_key(&remote) || self.pending_channels.contains_key(&remote) {
             return Ok(());
         }
@@ -1355,11 +1417,23 @@ impl Daemon {
         let sig_pub = sig_priv.verifying_key();
 
         // 3. Build request_data: pub_bytes(32) + sig_pub_bytes(32) + signalling(3)
+        //    Python RNS signalling format: 3 bytes packing MTU + mode
+        //    signalling_value = (mtu & 0x1FFFFF) + (((mode<<5) & 0xE0) << 16)
+        //    encoded as big-endian u32 truncated to last 3 bytes
+        const MTU_BYTEMASK: u32 = 0x1FFFFF;
+        const MODE_BYTEMASK: u8 = 0xE0;
+        const MODE_AES256_CBC: u8 = 0x01;
+        let mtu: u32 = rsticulum_packet::MAX_HOPS as u32 * 8; // ~512, close to Reticulum default 500
+        let mode: u8 = MODE_AES256_CBC;
+        let signalling_value = (mtu & MTU_BYTEMASK) | ((((mode << 5) & MODE_BYTEMASK) as u32) << 16);
+        let signalling = signalling_value.to_be_bytes()[1..4].to_vec(); // last 3 bytes
+
         let mut request_data = eph_pub.to_bytes().to_vec();
         request_data.extend_from_slice(&sig_pub.to_bytes());
-        request_data.extend_from_slice(&[0u8; 3]); // signalling: all 0 for now
+        request_data.extend_from_slice(&signalling);
 
-        // 4. Send as LINKREQUEST (HEADER_1, broadcast/unicast)
+        // 4. Send as LINKREQUEST (HEADER_1, unicast to peer or dest_hash)
+        let dest_addr = dest_hash.unwrap_or(*remote.as_bytes());
         let packet = rsticulum_packet::Packet {
             header_type: rsticulum_packet::HEADER_1,
             context_flag: rsticulum_packet::FLAG_UNSET,
@@ -1367,7 +1441,7 @@ impl Daemon {
             destination_type: rsticulum_packet::DEST_SINGLE,
             packet_type: rsticulum_packet::LINKREQUEST,
             hops: rsticulum_packet::MAX_HOPS,
-            destination_hash: *remote.as_bytes(),
+            destination_hash: dest_addr,
             transport_id: None,
             context: rsticulum_packet::NONE,
             data: request_data,
