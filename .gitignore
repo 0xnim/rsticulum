@@ -3,6 +3,12 @@
 **/*.rs.bk
 Cargo.lock
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
 # IDE
 .vscode/
 .idea/
@@ -12,4 +18,11 @@ Cargo.lock
 
 # Logs
 *.log
+
+# Runtime data
+.rsticulum/
+
+# Local only
 reference-reticulum/
+bridge.py
+--help
